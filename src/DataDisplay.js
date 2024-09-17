@@ -36,7 +36,7 @@ function WelcomeDialog({ closeDialog }) {
         muted
         controls // Adds play/pause controls for the video
       >
-        <source src="blob/master/public/Instructions.mp4" type="video/mp4" />
+        <source src="/Instructions.mp4" type="video/mp4" />
         Your browser does not support the video tag.
       </video>
       <button onClick={closeDialog} style={{
