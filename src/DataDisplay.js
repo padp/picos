@@ -105,11 +105,10 @@ function DroppableDiv({ keysInDiv = [], setKeysInDiv, data, title, setTitle }) {
           <p>Drop keys here</p>
         ) : (
           keysInDiv.map((key) => {
-            const list = data[key] || [];
-            const lastItem = list.length > 0 ? list[list.length - 1] : 'No data or fetch failed';
+            const item = data[key];
             return (
               <div className='key-item' key={key}>
-                <strong>{key}:</strong> <p>{lastItem ? JSON.stringify(lastItem) : 'Error retrieving data'}</p>
+                <strong>{key}:</strong> <p>{typeof item == 'boolean' ? item.toString() : item}</p>
                 <span className="remove-btn" onClick={() => handleRemove(key)}>
                   &times;
                 </span>
@@ -141,6 +140,7 @@ function DataDisplay() {
       try {
         const response = await axios.get(API_URI); // Adjust the URL
         const fetchedData = response.data[0]; // Assumes data is in the first element
+        console.log(fetchedData);
         if (fetchedData && '_id' in fetchedData) {
           delete fetchedData['_id'];
         }
