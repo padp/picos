@@ -26,7 +26,8 @@ function WelcomeDialog({ closeDialog }) {
     <div style={{
       position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
       padding: '20px', backgroundColor: '#fff', boxShadow: '0 4px 8px rgba(0, 0, 0, 0.5)',
-      zIndex: 1000, width: '800px', textAlign: 'center', borderRadius: '20px', opacity: '95%', borderStyle: 'solid', borderColor: 'gray'
+      zIndex: 1000, width: '90vw', maxWidth: '800px', textAlign: 'center', borderRadius: '20px',
+      opacity: '95%', borderStyle: 'solid', borderColor: 'gray'
     }}>
       <h3>Welcome!</h3>
       <p>This video is shown only on your first visit and will show you how to customize your data feed.</p>
@@ -174,7 +175,7 @@ function DataDisplay() {
   const closeDialog = () => {
     setShowDialog(false);
   };
-  
+
   // Function to add a new empty div with a title
   const addDiv = () => {
     setDivs((prevDivs) => [...prevDivs, { keys: [], title: 'New Container' }]);
@@ -258,12 +259,12 @@ function DataDisplay() {
 
         <div style={{ marginTop: '20px' }}>
           <label>
-            Data Retrieval Interval (milliseconds):
+            Data Retrieval Interval (seconds):
             <input
               type="number"
-              value={intervalTime}
-              min="1000"
-              onChange={(e) => setIntervalTime(Math.max(Number(e.target.value), 1000))}
+              value={intervalTime / 1000} // Convert milliseconds to seconds for display
+              min="1" // Minimum value in seconds (1 second)
+              onChange={(e) => setIntervalTime(Math.max(Number(e.target.value) * 1000, 1000))} // Convert seconds to milliseconds for internal use
             />
           </label>
         </div>
