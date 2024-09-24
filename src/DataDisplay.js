@@ -6,6 +6,9 @@ import Select from 'react-select';
 import { API_URI, DEFAULT_PAUSE_TIME } from './Constants';
 import EditableText from './EditableText';
 import DatalogComponent from './DatalogComponent';
+import { faPlus } from '@fortawesome/free-solid-svg-icons';
+import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
+import Tooltip from '@mui/material/Tooltip/Tooltip';
 
 const ItemTypes = {
   KEY: 'key',
@@ -77,11 +80,11 @@ function DraggableKey({ keyName }) {
   );
 }
 
-function DroppableDiv({ keysInDiv = [], setKeysInDiv, data, title, setTitle }) {
+function DroppableDiv({ keysInDiv = [], setKeysInDiv, data, title, setTitle, selectedKey }) {
   const [{ isOver }, drop] = useDrop(() => ({
     accept: ItemTypes.KEY,
     drop: (item) => {
-      setKeysInDiv(item.keyName);
+      setKeysInDiv((prevKeys) => [...new Set([...prevKeys, item.keyName])]); // Avoid duplicates
     },
     collect: (monitor) => ({
       isOver: !!monitor.isOver(),
@@ -96,43 +99,48 @@ function DroppableDiv({ keysInDiv = [], setKeysInDiv, data, title, setTitle }) {
     setTitle(newText);
   };
 
-  // Auto-scroll functionality
-  useEffect(() => {
-    const handleDrag = (e) => {
-      const scrollThreshold = 50; // Distance from the edge to trigger scroll
-      const scrollAmount = 20; // Pixels to scroll per event
-
-      if (e.clientY < scrollThreshold) {
-        // Scroll up if dragging near the top
-        window.scrollBy(0, -scrollAmount);
-      } else if (window.innerHeight - e.clientY < scrollThreshold) {
-        // Scroll down if dragging near the bottom
-        window.scrollBy(0, scrollAmount);
-      }
-    };
-
-    // Attach event listener during drag
-    window.addEventListener('dragover', handleDrag);
-
-    // Clean up event listener
-    return () => {
-      window.removeEventListener('dragover', handleDrag);
-    };
-  }, []);
+  // Handle click on the plus button to add the selected key
+  const handleAddSelectedKey = () => {
+    console.log(selectedKey);
+    if (selectedKey) {
+      setKeysInDiv((prevKeys) => [...new Set([...prevKeys, selectedKey.value])]); // Avoid duplicates
+    }
+  };
 
   return (
-    <div ref={drop} className="droppable-div" style={{ minHeight: '200px', border: '1px solid black', margin: '10px' }}>
-      <h3> <EditableText text={title} onTextChange={handleTextChange} /></h3>
+    <div ref={drop} className="droppable-div" style={{ minHeight: '200px', border: '1px solid black', margin: '10px', backgroundColor: isOver ? 'lightgreen' : 'transparent' }}>
+      <div style={{
+        cursor: 'pointer',
+        display: 'flex',
+        justifyContent: 'flex-end',
+        alignItems: 'center',
+        margin: '0%',
+      }}>
+        <Tooltip title="Add selected key to this container">
+          <div
+            style={addButtonStyle}
+            onClick={handleAddSelectedKey}
+            onMouseDown={(e) => e.currentTarget.style.transform = 'scale(0.95)'} // Click effect
+            onMouseUp={(e) => e.currentTarget.style.transform = 'scale(1)'} // Reset scale after click
+            onMouseLeave={(e) => e.currentTarget.style.transform = 'scale(1)'} // Ensure scale is reset if mouse leaves button during click
+          >
+            Add Selected
+            <p style={{ fontSize: '200%', marginTop: '2.5px', marginBottom: '0px', }}><FontAwesomeIcon icon={faPlus} /></p>
+          </div>
+        </Tooltip>
+      </div>
+
+      <h3 style={{ marginTop: '0px' }}> <EditableText text={title} onTextChange={handleTextChange} /></h3>
 
       <div className="flex-content">
         {keysInDiv.length === 0 ? (
-          <p>Drop keys here</p>
+          <p>Drop keys here or use the Add button</p>
         ) : (
           keysInDiv.map((key) => {
             const item = data[key];
             return (
               <div className='key-item' key={key}>
-                <strong>{key}:</strong> <p>{typeof item == 'boolean' ? item.toString() : item}</p>
+                <strong>{key}:</strong> <p>{typeof item === 'boolean' ? item.toString() : item}</p>
                 <span className="remove-btn" onClick={() => handleRemove(key)}>
                   &times;
                 </span>
@@ -146,7 +154,28 @@ function DroppableDiv({ keysInDiv = [], setKeysInDiv, data, title, setTitle }) {
   );
 }
 
+// Add button styles with hover and click effects
+const addButtonStyle = {
+  fontSize: '50%',
+  width: '10%',
+  margin: '0%',
+  borderRadius: '20px',
+  borderColor: '#454a53',
+  borderStyle: 'dotted',
+  borderWidth: 'thin',
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'center',
+  backgroundColor: '#f4f4f4',
+  transition: 'background-color 0.3s ease, transform 0.2s ease',
+  padding: '5px',
+};
 
+// Hover effect for the Add button
+addButtonStyle[':hover'] = {
+  backgroundColor: '#e0e0e0',
+  transform: 'scale(1.05)',
+};
 
 function DataDisplay() {
   const [data, setData] = useState({});
@@ -276,6 +305,7 @@ function DataDisplay() {
               data={data}
               title={div.title}
               setTitle={(newTitle) => updateTitle(index, newTitle)}
+              selectedKey={selectedKey}
             />
           ))}
         </div>
