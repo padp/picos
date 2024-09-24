@@ -5,6 +5,7 @@ import { HTML5Backend } from 'react-dnd-html5-backend';
 import Select from 'react-select';
 import { API_URI, DEFAULT_PAUSE_TIME } from './Constants';
 import EditableText from './EditableText';
+import DatalogComponent from './DatalogComponent';
 
 const ItemTypes = {
   KEY: 'key',
@@ -95,12 +96,34 @@ function DroppableDiv({ keysInDiv = [], setKeysInDiv, data, title, setTitle }) {
     setTitle(newText);
   };
 
+  // Auto-scroll functionality
+  useEffect(() => {
+    const handleDrag = (e) => {
+      const scrollThreshold = 50; // Distance from the edge to trigger scroll
+      const scrollAmount = 20; // Pixels to scroll per event
+
+      if (e.clientY < scrollThreshold) {
+        // Scroll up if dragging near the top
+        window.scrollBy(0, -scrollAmount);
+      } else if (window.innerHeight - e.clientY < scrollThreshold) {
+        // Scroll down if dragging near the bottom
+        window.scrollBy(0, scrollAmount);
+      }
+    };
+
+    // Attach event listener during drag
+    window.addEventListener('dragover', handleDrag);
+
+    // Clean up event listener
+    return () => {
+      window.removeEventListener('dragover', handleDrag);
+    };
+  }, []);
+
   return (
-    <div ref={drop} className="droppable-div">
-      {/* Title Centered */}
+    <div ref={drop} className="droppable-div" style={{ minHeight: '200px', border: '1px solid black', margin: '10px' }}>
       <h3> <EditableText text={title} onTextChange={handleTextChange} /></h3>
 
-      {/* Flexbox Content */}
       <div className="flex-content">
         {keysInDiv.length === 0 ? (
           <p>Drop keys here</p>
@@ -118,9 +141,11 @@ function DroppableDiv({ keysInDiv = [], setKeysInDiv, data, title, setTitle }) {
           })
         )}
       </div>
+      <DatalogComponent data={data} divKeys={keysInDiv} />
     </div>
   );
 }
+
 
 
 function DataDisplay() {
@@ -130,7 +155,7 @@ function DataDisplay() {
   const [intervalTime, setIntervalTime] = useState(DEFAULT_PAUSE_TIME);
   const [selectedKey, setSelectedKey] = useState(null);
   const [showDialog, setShowDialog] = useState(false);
-  const [title, setTitle] = useState("Double-click me to edit");
+  //const [title, setTitle] = useState("Double-click me to edit");
 
   const selectedKeyHandler = (selectedOption) => {
     setSelectedKey(selectedOption);
