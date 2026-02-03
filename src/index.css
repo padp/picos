@@ -1,0 +1,226 @@
+/* General Body Styling */
+body {
+  font-family: 'Roboto', sans-serif;
+  margin: 0;
+  padding: 0;
+  background-color: #f5f5f5;
+  color: #333;
+}
+
+div {
+  margin: 0.5%;
+}
+
+h1, h2, h3 {
+  font-weight: 500;
+  color: #2c3e50;
+}
+.droppable-div h3 {
+  text-align: center;
+  font-size: 18px;
+  margin-bottom: 20px;
+}
+
+.droppable-div .key-item {
+  display: flex;
+  flex-wrap: wrap; /* Allows items to wrap to the next line if there's no space */
+  gap: 10px; /* Optional gap between items */
+}
+
+.droppable-div .flex-content {
+  display: flex;
+  flex-wrap: wrap; /* Allow items to wrap to the next line */
+  gap: 10px; /* Optional gap between items */
+}
+
+.key-item > div {
+  flex: 1 1 45%; /* Flex items to take 45% of the width, adjusting to container size */
+  padding: 10px;
+  background-color: #ecf0f1;
+  border-radius: 5px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  min-width: 200px; /* Ensures flex items don't shrink too small */
+}
+/* Wrapper for your app content */
+.container {
+  width: 90%;
+  max-width: 1200px;
+  margin: 20px auto;
+  padding: 20px;
+  background-color: #ffffff;
+  border-radius: 10px;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+}
+
+/* Button Styles */
+button {
+  padding: 10px 20px;
+  background-color: #3498db;
+  border: none;
+  border-radius: 5px;
+  color: #fff;
+  font-size: 16px;
+  cursor: pointer;
+  transition: background-color 0.3s ease;
+}
+
+button:hover {
+  background-color: #2980b9;
+}
+
+/* Input Styles */
+input[type="text"], input[type="number"] {
+  width: 100%;
+  padding: 10px;
+  margin: 10px 0;
+  border: 1px solid #ccc;
+  border-radius: 5px;
+  font-size: 16px;
+}
+
+input[type="text"]:focus, input[type="number"]:focus {
+  border-color: #3498db;
+  outline: none;
+}
+
+/* Select Dropdown Styling */
+.select-container {
+  margin: 20px 0;
+}
+
+.select-container label {
+  font-size: 14px;
+  margin-bottom: 5px;
+  display: block;
+}
+
+.select-container .Select__control {
+  padding: 10px;
+  border: 1px solid #ccc;
+  border-radius: 5px;
+}
+
+.Select__control:hover, .Select__control--is-focused {
+  border-color: #3498db;
+}
+
+/* Droppable Div Styling */
+.droppable-div {
+  border: 2px dashed #3498db;
+  padding: 20px;
+  margin-bottom: 20px;
+  border-radius: 10px;
+  background-color: #f9f9f9;
+  transition: background-color 0.3s ease;
+}
+
+.droppable-div:hover {
+  background-color: #ecf0f1;
+}
+
+/* Key/Item Container */
+.key-item {
+  flex: 1 1 45%; /* Each key takes up 45% of the container width */
+  position: relative; /* Needed for absolute positioning of the 'x' button */
+  padding: 10px;
+  background-color: #eaf2f8;
+  border-radius: 5px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  margin-bottom: 10px;
+  min-width: 200px; /* Ensures items don't get too small */
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  box-sizing: border-box; /* Include padding in width calculations */
+}
+
+/* Strong text inside key items */
+.key-item strong {
+  color: #34495e;
+  font-size: 16px;
+  margin-right: 10px; /* Adds space between the text and the 'x' */
+}
+
+/* Hover effect for key items */
+.key-item:hover {
+  background-color: #d6eaf8;
+}
+
+.key-item .remove-btn {
+  position: absolute;
+  top: 5px; /* Positioned to the top right of the item */
+  right: 10px; /* Adds padding from the right edge */
+  cursor: pointer;
+  font-size: 20px;
+  color: #e74c3c;
+  transition: color 0.3s ease;
+}
+
+/* Hover effect for the 'x' */
+.key-item .remove-btn:hover {
+  color: #c0392b;
+}
+
+/* Title Input */
+.editable-title {
+  font-size: 24px;
+  font-weight: 600;
+  margin-bottom: 15px;
+  padding: 10px;
+  border: none;
+  border-bottom: 2px solid #3498db;
+  transition: border-color 0.3s ease;
+  background-color: transparent;
+}
+
+.editable-title:focus {
+  outline: none;
+  border-bottom-color: #2980b9;
+}
+
+/* Loading Spinner */
+.loading-spinner {
+  border: 4px solid rgba(0, 0, 0, 0.1);
+  border-left-color: #3498db;
+  border-radius: 50%;
+  width: 30px;
+  height: 30px;
+  animation: spin 1s linear infinite;
+  margin: 20px auto;
+}
+
+@keyframes spin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+/* Add Div Button */
+.add-div-button {
+  background-color: #2ecc71;
+  padding: 10px 15px;
+  font-size: 16px;
+  border-radius: 5px;
+  color: white;
+  cursor: pointer;
+  border: none;
+  transition: background-color 0.3s ease;
+}
+
+.add-div-button:hover {
+  background-color: #27ae60;
+}
+
+/* Container for Droppable Areas */
+.droppable-areas-container {
+  gap: 20px;
+}
+
+@media (max-width: 768px) {
+  .droppable-areas-container {
+    grid-template-columns: 1fr;
+  }
+}
