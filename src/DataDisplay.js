@@ -1,9 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
 import { DndProvider, useDrag, useDrop } from 'react-dnd';
 import { HTML5Backend } from 'react-dnd-html5-backend';
 import Select from 'react-select';
-import { API_URI, DEFAULT_PAUSE_TIME } from './Constants';
 import EditableText from './EditableText';
 import DatalogComponent from './DatalogComponent';
 import { faPlus } from '@fortawesome/free-solid-svg-icons';
@@ -177,11 +175,9 @@ addButtonStyle[':hover'] = {
   transform: 'scale(1.05)',
 };
 
-function DataDisplay() {
-  const [data, setData] = useState({});
+function DataDisplay({ data, intervalTime, setIntervalTime, onBackToDefault }) {
   const [availableKeys, setAvailableKeys] = useState([]);
   const [divs, setDivs] = useState(loadFromLocalStorage('divs', [{ keys: [], title: 'Default Title' }])); // Load from localStorage
-  const [intervalTime, setIntervalTime] = useState(DEFAULT_PAUSE_TIME);
   const [selectedKey, setSelectedKey] = useState(null);
   const [showDialog, setShowDialog] = useState(false);
   //const [title, setTitle] = useState("Double-click me to edit");
@@ -191,29 +187,10 @@ function DataDisplay() {
   }
 
   useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const response = await axios.get(API_URI); // Adjust the URL
-        const fetchedData = response.data[0]; // Assumes data is in the first element
-        console.log(fetchedData);
-        if (fetchedData && '_id' in fetchedData) {
-          delete fetchedData['_id'];
-        }
-        if (fetchedData && Object.keys(fetchedData).length > 0) {
-          setData(fetchedData);
-          if (availableKeys.length === 0) {
-            setAvailableKeys(Object.keys(fetchedData)); // Set keys on first fetch
-          }
-        }
-      } catch (error) {
-        console.error('Error fetching data:', error);
-      }
-    };
-
-    fetchData();
-    const interval = setInterval(fetchData, intervalTime);
-    return () => clearInterval(interval);
-  }, [intervalTime, availableKeys, selectedKey]);
+    if (availableKeys.length === 0 && Object.keys(data).length > 0) {
+      setAvailableKeys(Object.keys(data)); // Set keys on first fetch
+    }
+  }, [data, availableKeys]);
 
   useEffect(() => {
     // Check if the user has visited before
@@ -275,7 +252,12 @@ function DataDisplay() {
     <DndProvider backend={HTML5Backend}>
       {showDialog && <WelcomeDialog closeDialog={closeDialog} />}
       <div className="container">
-        <h1>Paducah Press Data</h1>
+        <div className="default-view-header">
+          <h1>Paducah Press Data</h1>
+          <button className="secondary-button" onClick={onBackToDefault}>
+            &larr; Default View
+          </button>
+        </div>
 
         <div className="select-container">
           <label htmlFor="keySelect">Select a key:</label>
