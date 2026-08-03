@@ -8,8 +8,10 @@ from pymongo.server_api import ServerApi
 app = Flask(__name__)
 CORS(app)
 
+sql_pass = os.environ["SQL_PASS"]
 client = MongoClient(
-    os.environ["MONGO_URI"], server_api=ServerApi("1"), serverSelectionTimeoutMS=5000
+    f"mongodb+srv://padpress1:{sql_pass}@cluster0.ywwxl.mongodb.net/"
+    "?retryWrites=true&w=majority&appName=Cluster0"
 )
 collection = client["press_db"]["press_data"]
 
