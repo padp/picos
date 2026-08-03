@@ -23,3 +23,10 @@ yarn-debug.log*
 yarn-error.log*
 
 ddlast.js
+
+# data key reference dumps
+MIDIS_DataKeys.txt
+MIDIS_DataKeys_backup10-17-20.txt
+MIDIS_DataKeys_w_11_20_20.txt
+MIDIS_Graph_DataKeys.txt
+PICOS_Tags.txt
