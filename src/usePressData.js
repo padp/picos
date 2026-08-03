@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
-import { API_URI, DEFAULT_PAUSE_TIME } from './Constants';
+import { API_URI, FALLBACK_API_URI, REQUEST_TIMEOUT, DEFAULT_PAUSE_TIME } from './Constants';
 
 function usePressData(intervalTime = DEFAULT_PAUSE_TIME) {
   const [data, setData] = useState({});
@@ -10,20 +10,28 @@ function usePressData(intervalTime = DEFAULT_PAUSE_TIME) {
     let cancelled = false;
 
     const fetchData = async () => {
+      let response;
       try {
-        const response = await axios.get(API_URI);
-        const fetchedData = response.data[0]; // Assumes data is in the first element
-        if (fetchedData && '_id' in fetchedData) {
-          delete fetchedData['_id'];
+        response = await axios.get(API_URI, { timeout: REQUEST_TIMEOUT });
+      } catch (primaryError) {
+        console.error('Primary API failed, trying fallback:', primaryError);
+        try {
+          response = await axios.get(FALLBACK_API_URI, { timeout: REQUEST_TIMEOUT });
+        } catch (fallbackError) {
+          console.error('Fallback API also failed:', fallbackError);
+          if (!cancelled) setIsLoading(false);
+          return;
         }
-        if (!cancelled && fetchedData && Object.keys(fetchedData).length > 0) {
-          setData(fetchedData);
-        }
-      } catch (error) {
-        console.error('Error fetching data:', error);
-      } finally {
-        if (!cancelled) setIsLoading(false);
       }
+
+      const fetchedData = response.data[0]; // Assumes data is in the first element
+      if (fetchedData && '_id' in fetchedData) {
+        delete fetchedData['_id'];
+      }
+      if (!cancelled && fetchedData && Object.keys(fetchedData).length > 0) {
+        setData(fetchedData);
+      }
+      if (!cancelled) setIsLoading(false);
     };
 
     fetchData();
