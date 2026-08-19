@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import DataDisplay from './DataDisplay';
 import DefaultView from './DefaultView';
+import PressUptimeView from './PressUptimeView';
 import usePressData from './usePressData';
 import { DEFAULT_PAUSE_TIME } from './Constants';
 
@@ -25,7 +26,14 @@ function App() {
   return (
     <div className="App">
       {mode === 'default' ? (
-        <DefaultView data={data} isLoading={isLoading} onBuildInterface={() => setMode('builder')} />
+        <DefaultView
+          data={data}
+          isLoading={isLoading}
+          onBuildInterface={() => setMode('builder')}
+          onViewUptime={() => setMode('uptime')}
+        />
+      ) : mode === 'uptime' ? (
+        <PressUptimeView onBackToDefault={() => setMode('default')} />
       ) : (
         <DataDisplay
           data={data}

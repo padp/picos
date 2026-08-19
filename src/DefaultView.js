@@ -19,7 +19,7 @@ function StatCard({ label, value }) {
   );
 }
 
-function DefaultView({ data, isLoading, onBuildInterface }) {
+function DefaultView({ data, isLoading, onBuildInterface, onViewUptime }) {
   const hasData = Object.keys(data).length > 0;
   const status = hasData ? getPressStatus(data) : null;
 
@@ -27,9 +27,14 @@ function DefaultView({ data, isLoading, onBuildInterface }) {
     <div className="container default-view">
       <div className="default-view-header">
         <h1>Paducah Press</h1>
-        <button className="secondary-button" onClick={onBuildInterface}>
-          Build Your Interface &rarr;
-        </button>
+        <div>
+          <button className="secondary-button" onClick={onViewUptime}>
+            Billet Cycles &amp; Uptime &rarr;
+          </button>
+          <button className="secondary-button" onClick={onBuildInterface}>
+            Build Your Interface &rarr;
+          </button>
+        </div>
       </div>
 
       {!hasData ? (

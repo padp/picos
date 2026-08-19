@@ -1,0 +1,38 @@
+"""MongoDB connection helper.
+
+Same connection pattern as the rest of this codebase (Fetch Log Data,
+Granco Saw Monitor): username and cluster host inline, only the password
+read from an env var (SQL_PASS). Reuses the existing press_db database
+(picos already owns press_data there) rather than standing up a new one -
+billet_cycles/state_events are just new collections alongside it.
+"""
+import os
+
+from pymongo import MongoClient
+
+DB_NAME = "press_db"
+
+_client = None
+
+
+def get_db():
+    global _client
+    if _client is None:
+        sql_pass = os.environ["SQL_PASS"]
+        _client = MongoClient(
+            f"mongodb+srv://padpress1:{sql_pass}@cluster0.ywwxl.mongodb.net/"
+            "?retryWrites=true&w=majority&appName=Cluster0"
+        )
+    return _client[DB_NAME]
+
+
+def ensure_indexes():
+    db = get_db()
+    # billet_key (job_number + both billet counters) rather than an
+    # autoincrement id - makes inserts idempotent-safe if the poller ever
+    # restarts mid-billet or (in a hypothetical multi-worker deployment)
+    # two pollers detect the same completion, since both would compute the
+    # same key and upsert into one row instead of duplicating it.
+    db.billet_cycles.create_index("billet_key", unique=True)
+    db.billet_cycles.create_index("ts")
+    db.state_events.create_index("ts_start")
