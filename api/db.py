@@ -35,4 +35,7 @@ def ensure_indexes():
     # same key and upsert into one row instead of duplicating it.
     db.billet_cycles.create_index("billet_key", unique=True)
     db.billet_cycles.create_index("ts")
+    # Supports billet_monitor.py's per-(profile, die_copy) gap baseline
+    # query (recent same-profile-and-die rows, newest first).
+    db.billet_cycles.create_index([("profile", 1), ("die_copy", 1), ("ts", -1)])
     db.state_events.create_index("ts_start")

@@ -5,15 +5,19 @@ import { PRESS_API_BASE, REQUEST_TIMEOUT, UPTIME_PAUSE_TIME } from './Constants'
 function usePressUptime(windowHours) {
   const [status, setStatus] = useState(null);
   const [uptime, setUptime] = useState(null);
+  const [breakdown, setBreakdown] = useState(null);
   const [billets, setBillets] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
 
   const fetchAll = useCallback(async (signal) => {
     try {
-      const [statusRes, uptimeRes, billetsRes] = await Promise.all([
+      const [statusRes, uptimeRes, breakdownRes, billetsRes] = await Promise.all([
         axios.get(`${PRESS_API_BASE}/api/press/status`, { timeout: REQUEST_TIMEOUT, signal }),
         axios.get(`${PRESS_API_BASE}/api/press/uptime`, {
+          timeout: REQUEST_TIMEOUT, signal, params: { hours: windowHours },
+        }),
+        axios.get(`${PRESS_API_BASE}/api/press/cycle-breakdown`, {
           timeout: REQUEST_TIMEOUT, signal, params: { hours: windowHours },
         }),
         axios.get(`${PRESS_API_BASE}/api/press/billets/recent`, {
@@ -22,6 +26,7 @@ function usePressUptime(windowHours) {
       ]);
       setStatus(statusRes.data);
       setUptime(uptimeRes.data);
+      setBreakdown(breakdownRes.data);
       setBillets(billetsRes.data.billets || []);
       setError(null);
     } catch (err) {
@@ -43,7 +48,7 @@ function usePressUptime(windowHours) {
     };
   }, [fetchAll]);
 
-  return { status, uptime, billets, isLoading, error };
+  return { status, uptime, breakdown, billets, isLoading, error };
 }
 
 export default usePressUptime;

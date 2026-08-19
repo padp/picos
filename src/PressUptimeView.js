@@ -15,6 +15,20 @@ const REASON_COLORS = {
   Unspecified: '#898781',
 };
 
+// Production-cycle breakdown (billet_monitor.py's gap classification, see
+// its module docstring): only Stoppage is a real problem, so it's the one
+// status-red segment - everything else (extrusion itself, and the three
+// *expected* reasons a billet isn't extruding) gets a distinct, calmer hue
+// so "how much red is there" answers the question at a glance.
+const CYCLE_COLORS = {
+  Extrusion: '#0ca30c',
+  'Dead Cycle': '#2a78d6',
+  Cleanout: '#4a3aa7',
+  'Die Change': '#eb6834',
+  Startup: '#898781',
+  Stoppage: '#d03b3b',
+};
+
 const WINDOW_OPTIONS = [
   { label: '1h', hours: 1 },
   { label: '8h', hours: 8 },
@@ -112,6 +126,69 @@ function UptimeBar({ uptime }) {
   );
 }
 
+function CycleBreakdownBar({ breakdown }) {
+  if (!breakdown) return null;
+
+  const segments = [
+    { label: 'Extrusion', seconds: breakdown.extrusion_s },
+    { label: 'Dead Cycle', seconds: breakdown.dead_cycle_s },
+    { label: 'Cleanout', seconds: breakdown.cleanout_s },
+    { label: 'Die Change', seconds: breakdown.die_change_s },
+    { label: 'Startup', seconds: breakdown.startup_s },
+    { label: 'Stoppage', seconds: breakdown.stoppage_total_s },
+  ]
+    .filter((seg) => seg.seconds > 0)
+    .map((seg) => ({ ...seg, color: CYCLE_COLORS[seg.label] }));
+
+  const total = segments.reduce((sum, seg) => sum + seg.seconds, 0);
+  if (total === 0) {
+    return <p className="uptime-bar-empty">No billets recorded yet for this window.</p>;
+  }
+
+  return (
+    <div>
+      <div className="uptime-bar" role="img" aria-label="Production cycle breakdown">
+        {segments.map((seg) => (
+          <div
+            key={seg.label}
+            className="uptime-bar-segment"
+            style={{ width: `${(seg.seconds / total) * 100}%`, backgroundColor: seg.color }}
+            title={`${seg.label}: ${formatDuration(seg.seconds)} (${((seg.seconds / total) * 100).toFixed(1)}%)`}
+          />
+        ))}
+      </div>
+      <div className="uptime-legend">
+        {segments.map((seg) => (
+          <div className="uptime-legend-item" key={seg.label}>
+            <span className="uptime-legend-swatch" style={{ backgroundColor: seg.color }} />
+            <span className="uptime-legend-label">{seg.label}</span>
+            <span className="uptime-legend-value">
+              {formatDuration(seg.seconds)} ({((seg.seconds / total) * 100).toFixed(1)}%)
+            </span>
+          </div>
+        ))}
+      </div>
+      {breakdown.stoppage_total_s > 0 && (
+        <p className="stat-sub">
+          Stoppage breakdown: {formatDuration(breakdown.stoppage_s)} before billets,{' '}
+          {formatDuration(breakdown.in_billet_stall_s)} mid-extrusion.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function gapTag(b) {
+  // Precedence matches billet_monitor.py's own classification order
+  // (startup > cleanout > die change > baselined normal/stoppage).
+  if (b.is_startup) return { label: 'Startup', color: CYCLE_COLORS.Startup };
+  if (b.is_cleanout) return { label: 'Cleanout', color: CYCLE_COLORS.Cleanout };
+  if (b.is_die_change) return { label: 'Die Change', color: CYCLE_COLORS['Die Change'] };
+  if (b.stoppage_s > 0) return { label: 'Stoppage', color: CYCLE_COLORS.Stoppage };
+  if (b.gap_before_s !== undefined && b.gap_before_s !== null) return { label: 'Normal', color: CYCLE_COLORS['Dead Cycle'] };
+  return null; // pre-dates this classification
+}
+
 function BilletsTable({ billets }) {
   if (!billets || billets.length === 0) {
     return <p>No billet cycles recorded yet.</p>;
@@ -124,29 +201,46 @@ function BilletsTable({ billets }) {
             <th>Time</th>
             <th>Billet</th>
             <th>Job #</th>
+            <th>Die</th>
             <th>Alloy</th>
             <th>Length (in)</th>
             <th>Extrusion (s)</th>
-            <th>Cycle (s)</th>
+            <th>Gap (s)</th>
+            <th>Gap type</th>
             <th>Peak Force (UST)</th>
           </tr>
         </thead>
         <tbody>
-          {billets.map((b) => (
-            <tr key={b.billet_key}>
-              <td>{formatClock(b.ts)}</td>
-              <td>
-                {b.billet_number_per_order ?? '—'}
-                {b.scheduled_billets ? ` / ${b.scheduled_billets}` : ''}
-              </td>
-              <td>{b.job_number || '—'}</td>
-              <td>{b.alloy_name || '—'}</td>
-              <td>{formatNumber(b.billet_length_actual_in, 2)}</td>
-              <td>{formatNumber(b.extrusion_time_s, 0)}</td>
-              <td>{formatNumber(b.cycle_duration_s, 0)}</td>
-              <td>{formatNumber(b.extrusion_force_peak_ust, 0)}</td>
-            </tr>
-          ))}
+          {billets.map((b) => {
+            const tag = gapTag(b);
+            const stallNote = b.in_billet_stall_s > 0 ? ` (+${formatNumber(b.in_billet_stall_s, 0)}s mid-stall)` : '';
+            return (
+              <tr key={b.billet_key}>
+                <td>{formatClock(b.ts)}</td>
+                <td>
+                  {b.billet_number_per_order ?? '—'}
+                  {b.scheduled_billets ? ` / ${b.scheduled_billets}` : ''}
+                </td>
+                <td>{b.job_number || '—'}</td>
+                <td>{b.die_copy ?? '—'}</td>
+                <td>{b.alloy_name || '—'}</td>
+                <td>{formatNumber(b.billet_length_actual_in, 2)}</td>
+                <td>{formatNumber(b.extrusion_duration_s ?? b.extrusion_time_s, 0)}</td>
+                <td>
+                  {formatNumber(b.gap_before_s, 0)}
+                  {stallNote}
+                </td>
+                <td>
+                  {tag ? (
+                    <span className="gap-tag" style={{ backgroundColor: tag.color }}>
+                      {tag.label}
+                    </span>
+                  ) : '—'}
+                </td>
+                <td>{formatNumber(b.extrusion_force_peak_ust, 0)}</td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -155,9 +249,12 @@ function BilletsTable({ billets }) {
 
 function PressUptimeView({ onBackToDefault }) {
   const [windowHours, setWindowHours] = useState(24);
-  const { status, uptime, billets, isLoading, error } = usePressUptime(windowHours);
+  const { status, uptime, breakdown, billets, isLoading, error } = usePressUptime(windowHours);
 
   const badge = uptime ? getStateBadge(uptime.current_state, uptime.current_reason) : null;
+  const accounted = breakdown ? breakdown.accounted_seconds : null;
+  const extrusionPct = breakdown && accounted ? (breakdown.extrusion_s / accounted) * 100 : null;
+  const stoppagePct = breakdown && accounted ? (breakdown.stoppage_total_s / accounted) * 100 : null;
 
   return (
     <div className="container">
@@ -201,9 +298,9 @@ function PressUptimeView({ onBackToDefault }) {
           </div>
 
           <div className="stat-grid">
-            <StatCard label="Uptime" value={uptime && uptime.uptime_pct !== null ? `${uptime.uptime_pct}%` : '—'} />
-            <StatCard label="Uptime Total" value={uptime ? formatDuration(uptime.uptime_seconds) : '—'} />
-            <StatCard label="Downtime Total" value={uptime ? formatDuration(uptime.downtime_seconds) : '—'} />
+            <StatCard label="Extruding" value={extrusionPct !== null ? `${extrusionPct.toFixed(1)}%` : '—'} />
+            <StatCard label="Stoppage" value={stoppagePct !== null ? `${stoppagePct.toFixed(1)}%` : '—'} />
+            <StatCard label="Billets" value={breakdown ? breakdown.billet_count : '—'} />
             <StatCard
               label="Last Billet"
               value={status && status.latest_billet ? `#${status.latest_billet.billet_number_per_order}` : '—'}
@@ -211,7 +308,24 @@ function PressUptimeView({ onBackToDefault }) {
             />
           </div>
 
-          <h3>Uptime vs Downtime</h3>
+          <h3>Production Cycle Breakdown</h3>
+          <p className="stat-sub">
+            Is the press actually extruding? Splits every billet's cycle into extrusion time and the
+            gap before it - normal dead cycle (discard shear + reload), cleanout (alloy-family change),
+            die change, or an unexplained stoppage, baselined per profile/die against its own recent history.
+          </p>
+          <CycleBreakdownBar breakdown={breakdown} />
+
+          <h3>Automatic Mode: Uptime vs Downtime</h3>
+          <p className="stat-sub">
+            The press's control-mode timeline (Automatic Mode Active) - stays "up" through the normal
+            gap between billets, so this is a coarser signal than the breakdown above.
+          </p>
+          <div className="stat-grid">
+            <StatCard label="Uptime" value={uptime && uptime.uptime_pct !== null ? `${uptime.uptime_pct}%` : '—'} />
+            <StatCard label="Uptime Total" value={uptime ? formatDuration(uptime.uptime_seconds) : '—'} />
+            <StatCard label="Downtime Total" value={uptime ? formatDuration(uptime.downtime_seconds) : '—'} />
+          </div>
           <UptimeBar uptime={uptime} />
 
           <h3>Recent Billets</h3>

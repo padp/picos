@@ -127,6 +127,63 @@ def press_uptime():
     )
 
 
+@app.get("/api/press/cycle-breakdown")
+def cycle_breakdown():
+    """Where the press's time actually went, billet by billet - a finer,
+    complementary view to /api/press/uptime's press-control-mode timeline.
+    Automatic Mode staying on through the normal gap between billets isn't
+    downtime, so that endpoint alone can't answer "is the press actually
+    producing". This one can, using the dead_cycle/cleanout/die_change/
+    stoppage split billet_monitor.py computes per billet (see its module
+    docstring for the full reasoning, ported from Press History UI's
+    per-profile/die-copy baseline methodology).
+
+    stoppage_total_s combines stoppage_s (an abnormally long gap *before*
+    a billet, beyond that profile/die's own recent baseline) and
+    in_billet_stall_s (ram speed reading ~0 *during* a billet) - both are
+    real, unexplained stalls, just at different points in the cycle."""
+    hours = min(float(request.args.get("hours", 24)), MAX_UPTIME_WINDOW_HOURS)
+    window_start = (datetime.now() - timedelta(hours=hours)).isoformat()
+
+    db = get_db()
+    billets = list(db.billet_cycles.find(
+        {"ts": {"$gte": window_start}},
+        projection={
+            "_id": False, "extrusion_duration_s": True, "gap_before_s": True,
+            "dead_cycle_s": True, "stoppage_s": True, "in_billet_stall_s": True,
+            "is_startup": True, "is_cleanout": True, "is_die_change": True,
+        },
+    ))
+
+    totals = {
+        "extrusion_s": 0.0, "dead_cycle_s": 0.0, "cleanout_s": 0.0,
+        "die_change_s": 0.0, "startup_s": 0.0, "stoppage_s": 0.0, "in_billet_stall_s": 0.0,
+    }
+    for b in billets:
+        totals["extrusion_s"] += b.get("extrusion_duration_s") or 0.0
+        totals["in_billet_stall_s"] += b.get("in_billet_stall_s") or 0.0
+        gap = b.get("gap_before_s") or 0.0
+        if b.get("is_startup"):
+            totals["startup_s"] += gap
+        elif b.get("is_cleanout"):
+            totals["cleanout_s"] += gap
+        elif b.get("is_die_change"):
+            totals["die_change_s"] += gap
+        else:
+            totals["dead_cycle_s"] += b.get("dead_cycle_s") or 0.0
+            totals["stoppage_s"] += b.get("stoppage_s") or 0.0
+
+    accounted_seconds = sum(totals.values())
+    totals["stoppage_total_s"] = totals["stoppage_s"] + totals["in_billet_stall_s"]
+
+    return jsonify(
+        window_hours=hours,
+        billet_count=len(billets),
+        accounted_seconds=accounted_seconds,
+        **totals,
+    )
+
+
 @app.get("/health")
 def health_check():
     return jsonify(ok=True)
