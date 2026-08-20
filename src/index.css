@@ -310,26 +310,43 @@ input[type="text"]:focus, input[type="number"]:focus {
   margin: 10px 0;
 }
 
-.window-picker {
+.shift-picker {
   display: flex;
-  gap: 8px;
+  align-items: center;
+  gap: 12px;
   margin: 15px 0;
 }
 
-.window-picker-btn {
-  background-color: #ecf0f1;
+.shift-picker-label {
+  font-size: 15px;
   color: #2c3e50;
-  padding: 6px 14px;
-  font-size: 14px;
+  min-width: 200px;
+  text-align: center;
 }
 
-.window-picker-btn:hover {
+.shift-picker-live {
+  color: #7f8c8d;
+  font-weight: normal;
+}
+
+.stat-card-clickable {
+  cursor: pointer;
+  transition: background-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.stat-card-clickable:hover,
+.stat-card-clickable:focus-visible {
   background-color: #d6eaf8;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+  outline: none;
 }
 
-.window-picker-btn.active {
-  background-color: #3498db;
-  color: #fff;
+.stoppages-panel {
+  background-color: #fdf6ec;
+  border: 1px solid #f5e2c0;
+  border-radius: 8px;
+  padding: 15px 20px;
+  margin: 10px 0 25px;
 }
 
 .uptime-bar {

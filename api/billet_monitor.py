@@ -63,8 +63,24 @@ import statistics
 import threading
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from db import ensure_indexes, get_db
+
+# The press writes naive local wall-clock timestamps (see
+# _parse_press_datetime below) - any "now" compared against one of those
+# must be in the plant's own timezone, not this process's. Confirmed live:
+# on Render (server clock runs UTC) a bare datetime.now() put the status
+# banner's "time since last billet" off by ~5 hours - exactly the CDT
+# offset - even though it read correctly in local testing, since that
+# machine already happened to be in the plant's own timezone. Matches
+# Granco Saw Monitor's api/app.py PLANT_TZ exactly, same reasoning.
+PLANT_TZ = ZoneInfo("America/Chicago")
+
+
+def plant_now() -> datetime:
+    return datetime.now(PLANT_TZ).replace(tzinfo=None)
+
 
 POLL_INTERVAL_S = 2.0
 # GetSendPressDataToDB.py normally updates press_data roughly every
@@ -285,7 +301,7 @@ class Detector:
         # rather than let it dangle open forever. The gap between then and
         # now is simply uncovered, not mis-recorded as extra RUNNING/IDLE
         # time either way.
-        now_iso = datetime.now().isoformat()
+        now_iso = plant_now().isoformat()
         db.state_events.update_many(
             {"ts_end": None}, {"$set": {"ts_end": now_iso}}
         )
@@ -305,7 +321,7 @@ class Detector:
             self._last_change_monotonic = poll_monotonic
 
         if (poll_monotonic - self._last_change_monotonic) > STALE_THRESHOLD_S:
-            ts = _parse_press_datetime(self._last_seen_dt_str) or datetime.now()
+            ts = _parse_press_datetime(self._last_seen_dt_str) or plant_now()
             self._update_state(ts, UNKNOWN, "Stale Data")
             self._prev_extrusion_active = False
             return

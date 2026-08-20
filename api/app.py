@@ -1,10 +1,11 @@
 import os
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 import billet_monitor
+from billet_monitor import plant_now
 from db import ensure_indexes, get_db
 
 app = Flask(__name__)
@@ -20,7 +21,61 @@ CORS(app)
 # >10min real stall), and it couldn't tell a fast-cycling small profile's
 # genuinely-stuck 3 minutes from a slow profile's completely normal one.
 BILLET_STALL_FALLBACK_THRESHOLD_S = 10 * 60
-MAX_UPTIME_WINDOW_HOURS = 24 * 30
+
+# Same shift boundaries as Granco Saw Monitor's api/app.py and Press
+# History UI's get_press_uptime.py - this plant runs one shift schedule,
+# not a per-tool one, so all three should report the same shift for the
+# same moment. Third shift crosses midnight; its label date is the date
+# its early-morning half falls on (see _current_date_and_shift), matching
+# both sibling projects exactly.
+SHIFT_NAMES = ["First Shift", "Second Shift", "Third Shift"]
+_FIRST_START = (6, 50)
+_SECOND_START = (14, 50)
+_THIRD_START = (22, 50)
+
+
+def _shift_name_for(t: tuple) -> str:
+    if t >= _THIRD_START or t < _FIRST_START:
+        return "Third Shift"
+    if t < _SECOND_START:
+        return "First Shift"
+    return "Second Shift"
+
+
+def _current_date_and_shift(now: datetime) -> tuple:
+    t = (now.hour, now.minute)
+    shift = _shift_name_for(t)
+    if shift == "Third Shift" and t >= _THIRD_START:
+        label_date = (now + timedelta(hours=1, minutes=30)).date()
+    else:
+        label_date = now.date()
+    return label_date.isoformat(), shift
+
+
+def _shift_window(date_str: str, shift_name: str) -> tuple:
+    d = date.fromisoformat(date_str)
+    if shift_name == "First Shift":
+        return datetime.combine(d, time(*_FIRST_START)), datetime.combine(d, time(*_SECOND_START))
+    if shift_name == "Second Shift":
+        return datetime.combine(d, time(*_SECOND_START)), datetime.combine(d, time(*_THIRD_START))
+    return datetime.combine(d - timedelta(days=1), time(*_THIRD_START)), datetime.combine(d, time(*_FIRST_START))
+
+
+def _resolve_shift_params():
+    """date+shift from the query string, defaulting to whatever shift is
+    live right now if either is missing/invalid - so a plain GET with no
+    params (the dashboard's initial load) always lands on the current shift."""
+    date_str = request.args.get("date")
+    shift_name = request.args.get("shift")
+    if not date_str or shift_name not in SHIFT_NAMES:
+        date_str, shift_name = _current_date_and_shift(plant_now())
+    window_start, window_end = _shift_window(date_str, shift_name)
+    # A shift still in progress has a window_end in the future - clip to
+    # now so it isn't scored as if the remaining, not-yet-happened part of
+    # the shift were uncovered/unknown time.
+    window_end = min(window_end, plant_now())
+    return date_str, shift_name, window_start, window_end
+
 
 if os.environ.get("SQL_PASS"):
     # Skipped at build time (no SQL_PASS yet) - runs at import time so it
@@ -71,7 +126,7 @@ def press_status():
     stalled = False
     if latest_billet and latest_billet.get("ts"):
         last_billet_ts = datetime.fromisoformat(latest_billet["ts"])
-        seconds_since_last_billet = (datetime.now() - last_billet_ts).total_seconds()
+        seconds_since_last_billet = (plant_now() - last_billet_ts).total_seconds()
         is_running = bool(latest_state) and latest_state.get("state") == billet_monitor.RUNNING
 
         if is_running and not extrusion_active:
@@ -95,10 +150,45 @@ def press_status():
 
 @app.get("/api/press/billets/recent")
 def billets_recent():
-    limit = min(int(request.args.get("limit", 50)), 200)
+    """All billets in the selected shift (see _resolve_shift_params),
+    newest first. limit is just a safety cap, not the primary way of
+    bounding this - a shift naturally bounds it to a normal-sized list."""
+    limit = min(int(request.args.get("limit", 200)), 500)
+    date_str, shift_name, window_start, window_end = _resolve_shift_params()
     db = get_db()
-    billets = list(db.billet_cycles.find(sort=[("ts", -1)], limit=limit, projection={"_id": False}))
-    return jsonify(billets=billets)
+    billets = list(db.billet_cycles.find(
+        {"ts": {"$gte": window_start.isoformat(), "$lt": window_end.isoformat()}},
+        sort=[("ts", -1)], limit=limit, projection={"_id": False},
+    ))
+    return jsonify(date=date_str, shift=shift_name, billets=billets)
+
+
+@app.get("/api/press/stoppages")
+def stoppages():
+    """Individual unexplained-stoppage instances in the selected shift -
+    each tied to the specific billet it happened around (profile, die
+    copy, billet number), unlike /api/press/uptime's state_events, which
+    only know a reason (Emergency/Setup/Manual/...), not which billet was
+    involved. total_stoppage_s combines a gap-before-billet stoppage and
+    an in-billet stall - see billet_monitor.py's module docstring."""
+    date_str, shift_name, window_start, window_end = _resolve_shift_params()
+    db = get_db()
+    rows = list(db.billet_cycles.find(
+        {
+            "ts": {"$gte": window_start.isoformat(), "$lt": window_end.isoformat()},
+            "$or": [{"stoppage_s": {"$gt": 0}}, {"in_billet_stall_s": {"$gt": 0}}],
+        },
+        sort=[("ts", -1)],
+        projection={
+            "_id": False, "ts": True, "profile": True, "die_copy": True,
+            "job_number": True, "billet_number_per_order": True,
+            "stoppage_s": True, "in_billet_stall_s": True,
+        },
+    ))
+    for row in rows:
+        row["total_stoppage_s"] = (row.get("stoppage_s") or 0.0) + (row.get("in_billet_stall_s") or 0.0)
+
+    return jsonify(date=date_str, shift=shift_name, stoppages=rows)
 
 
 def _clipped_seconds(ts_start_iso, ts_end_iso, window_start, window_end):
@@ -110,19 +200,17 @@ def _clipped_seconds(ts_start_iso, ts_end_iso, window_start, window_end):
 @app.get("/api/press/uptime")
 def press_uptime():
     """Total RUNNING (uptime) vs IDLE (downtime, broken down by reason)
-    over a trailing window - state_events is the same RUNNING/IDLE/UNKNOWN
+    over the selected shift - state_events is the same RUNNING/IDLE/UNKNOWN
     ledger Granco Saw Monitor keeps for the saw, driven here by the
     press's "Automatic Mode Active" tag instead of the saw's AUTO_MODE
     (see billet_monitor.py). uptime_pct is against the covered portion of
     the window (excludes any UNKNOWN/no-data gap, e.g. before this
     feature was deployed), not the raw window length."""
-    hours = min(float(request.args.get("hours", 24)), MAX_UPTIME_WINDOW_HOURS)
-    now = datetime.now()
-    window_start = now - timedelta(hours=hours)
+    date_str, shift_name, window_start, window_end = _resolve_shift_params()
 
     db = get_db()
     events = db.state_events.find(
-        {"ts_start": {"$lt": now.isoformat()},
+        {"ts_start": {"$lt": window_end.isoformat()},
          "$or": [{"ts_end": None}, {"ts_end": {"$gt": window_start.isoformat()}}]},
         projection={"_id": False},
     )
@@ -131,7 +219,7 @@ def press_uptime():
     downtime_by_reason = {}
     unknown_seconds = 0.0
     for event in events:
-        secs = _clipped_seconds(event["ts_start"], event.get("ts_end"), window_start, now)
+        secs = _clipped_seconds(event["ts_start"], event.get("ts_end"), window_start, window_end)
         if event["state"] == billet_monitor.RUNNING:
             uptime_seconds += secs
         elif event["state"] == billet_monitor.IDLE:
@@ -147,7 +235,8 @@ def press_uptime():
     current = db.state_events.find_one(sort=[("ts_start", -1)], projection={"_id": False})
 
     return jsonify(
-        window_hours=hours,
+        date=date_str,
+        shift=shift_name,
         uptime_seconds=uptime_seconds,
         downtime_seconds=downtime_seconds,
         downtime_by_reason=downtime_by_reason,
@@ -161,25 +250,25 @@ def press_uptime():
 
 @app.get("/api/press/cycle-breakdown")
 def cycle_breakdown():
-    """Where the press's time actually went, billet by billet - a finer,
-    complementary view to /api/press/uptime's press-control-mode timeline.
-    Automatic Mode staying on through the normal gap between billets isn't
-    downtime, so that endpoint alone can't answer "is the press actually
-    producing". This one can, using the dead_cycle/cleanout/die_change/
-    stoppage split billet_monitor.py computes per billet (see its module
-    docstring for the full reasoning, ported from Press History UI's
-    per-profile/die-copy baseline methodology).
+    """Where the press's time actually went, billet by billet, over the
+    selected shift - a finer, complementary view to /api/press/uptime's
+    press-control-mode timeline. Automatic Mode staying on through the
+    normal gap between billets isn't downtime, so that endpoint alone
+    can't answer "is the press actually producing". This one can, using
+    the dead_cycle/cleanout/die_change/stoppage split billet_monitor.py
+    computes per billet (see its module docstring for the full reasoning,
+    ported from Press History UI's per-profile/die-copy baseline
+    methodology).
 
     stoppage_total_s combines stoppage_s (an abnormally long gap *before*
     a billet, beyond that profile/die's own recent baseline) and
     in_billet_stall_s (ram speed reading ~0 *during* a billet) - both are
     real, unexplained stalls, just at different points in the cycle."""
-    hours = min(float(request.args.get("hours", 24)), MAX_UPTIME_WINDOW_HOURS)
-    window_start = (datetime.now() - timedelta(hours=hours)).isoformat()
+    date_str, shift_name, window_start, window_end = _resolve_shift_params()
 
     db = get_db()
     billets = list(db.billet_cycles.find(
-        {"ts": {"$gte": window_start}},
+        {"ts": {"$gte": window_start.isoformat(), "$lt": window_end.isoformat()}},
         projection={
             "_id": False, "extrusion_duration_s": True, "gap_before_s": True,
             "dead_cycle_s": True, "stoppage_s": True, "in_billet_stall_s": True,
@@ -209,7 +298,8 @@ def cycle_breakdown():
     totals["stoppage_total_s"] = totals["stoppage_s"] + totals["in_billet_stall_s"]
 
     return jsonify(
-        window_hours=hours,
+        date=date_str,
+        shift=shift_name,
         billet_count=len(billets),
         accounted_seconds=accounted_seconds,
         **totals,

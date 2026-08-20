@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import usePressUptime from './usePressUptime';
 
 // RUNNING and the muted "no data" cases are fixed status colors; each
@@ -29,12 +29,31 @@ const CYCLE_COLORS = {
   Stoppage: '#d03b3b',
 };
 
-const WINDOW_OPTIONS = [
-  { label: '1h', hours: 1 },
-  { label: '8h', hours: 8 },
-  { label: '24h', hours: 24 },
-  { label: '7d', hours: 24 * 7 },
-];
+// Chronological order for a given label-date: Third Shift starts the
+// PREVIOUS evening but is labeled with the date its early-morning half
+// falls on (matches app.py's _current_date_and_shift exactly), so within
+// one label-date it actually runs first.
+const SHIFT_SEQUENCE = ['Third Shift', 'First Shift', 'Second Shift'];
+
+function addDays(dateStr, delta) {
+  const d = new Date(`${dateStr}T00:00:00`);
+  d.setDate(d.getDate() + delta);
+  return d.toISOString().slice(0, 10);
+}
+
+function shiftStep(dateStr, shift, direction) {
+  const idx = SHIFT_SEQUENCE.indexOf(shift);
+  let newIdx = idx + direction;
+  let newDate = dateStr;
+  if (newIdx < 0) {
+    newIdx = SHIFT_SEQUENCE.length - 1;
+    newDate = addDays(dateStr, -1);
+  } else if (newIdx >= SHIFT_SEQUENCE.length) {
+    newIdx = 0;
+    newDate = addDays(dateStr, 1);
+  }
+  return { date: newDate, shift: SHIFT_SEQUENCE[newIdx] };
+}
 
 function formatDuration(seconds) {
   if (seconds === null || seconds === undefined || Number.isNaN(seconds)) return '—';
@@ -68,12 +87,45 @@ function getStateBadge(state, reason) {
   return { label: reason === 'Stale Data' ? 'No Data' : 'Unknown', color: NO_DATA_COLOR };
 }
 
-function StatCard({ label, value, sub }) {
+function StatCard({ label, value, sub, onClick, expanded }) {
+  const clickable = !!onClick;
   return (
-    <div className="stat-card">
-      <div className="stat-label">{label}</div>
+    <div
+      className={clickable ? 'stat-card stat-card-clickable' : 'stat-card'}
+      role={clickable ? 'button' : undefined}
+      tabIndex={clickable ? 0 : undefined}
+      onClick={onClick}
+      onKeyDown={clickable ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } } : undefined}
+    >
+      <div className="stat-label">
+        {label}
+        {clickable ? (expanded ? ' ▲' : ' ▼') : ''}
+      </div>
       <div className="stat-value">{value === undefined || value === null || value === '' ? '—' : value}</div>
       {sub && <div className="stat-sub">{sub}</div>}
+    </div>
+  );
+}
+
+function ShiftPicker({ date, shift, isCurrent, onNavigate, onJumpToCurrent }) {
+  return (
+    <div className="shift-picker">
+      <button className="secondary-button" onClick={() => onNavigate(-1)} aria-label="Previous shift">
+        &larr;
+      </button>
+      <div className="shift-picker-label">
+        <strong>{shift || '—'}</strong>
+        {date ? ` · ${date}` : ''}
+        {isCurrent && <span className="shift-picker-live"> (current)</span>}
+      </div>
+      <button className="secondary-button" onClick={() => onNavigate(1)} aria-label="Next shift">
+        &rarr;
+      </button>
+      {!isCurrent && (
+        <button className="secondary-button" onClick={onJumpToCurrent}>
+          Current Shift
+        </button>
+      )}
     </div>
   );
 }
@@ -96,7 +148,7 @@ function UptimeBar({ uptime }) {
 
   const total = segments.reduce((sum, seg) => sum + seg.seconds, 0);
   if (total === 0) {
-    return <p className="uptime-bar-empty">No coverage yet for this window.</p>;
+    return <p className="uptime-bar-empty">No coverage yet for this shift.</p>;
   }
 
   return (
@@ -142,7 +194,7 @@ function CycleBreakdownBar({ breakdown }) {
 
   const total = segments.reduce((sum, seg) => sum + seg.seconds, 0);
   if (total === 0) {
-    return <p className="uptime-bar-empty">No billets recorded yet for this window.</p>;
+    return <p className="uptime-bar-empty">No billets recorded yet for this shift.</p>;
   }
 
   return (
@@ -168,12 +220,6 @@ function CycleBreakdownBar({ breakdown }) {
           </div>
         ))}
       </div>
-      {breakdown.stoppage_total_s > 0 && (
-        <p className="stat-sub">
-          Stoppage breakdown: {formatDuration(breakdown.stoppage_s)} before billets,{' '}
-          {formatDuration(breakdown.in_billet_stall_s)} mid-extrusion.
-        </p>
-      )}
     </div>
   );
 }
@@ -187,6 +233,40 @@ function gapTag(b) {
   if (b.stoppage_s > 0) return { label: 'Stoppage', color: CYCLE_COLORS.Stoppage };
   if (b.gap_before_s !== undefined && b.gap_before_s !== null) return { label: 'Normal', color: CYCLE_COLORS['Dead Cycle'] };
   return null; // pre-dates this classification
+}
+
+function StoppagesTable({ stoppages }) {
+  if (!stoppages || stoppages.length === 0) {
+    return <p>No unexplained stoppages this shift.</p>;
+  }
+  return (
+    <div className="billets-table-wrap">
+      <table className="billets-table">
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Profile</th>
+            <th>Die</th>
+            <th>Job #</th>
+            <th>Billet #</th>
+            <th>Duration</th>
+          </tr>
+        </thead>
+        <tbody>
+          {stoppages.map((s, i) => (
+            <tr key={`${s.ts}-${i}`}>
+              <td>{formatClock(s.ts)}</td>
+              <td>{s.profile || '—'}</td>
+              <td>{s.die_copy ?? '—'}</td>
+              <td>{s.job_number || '—'}</td>
+              <td>{s.billet_number_per_order ?? '—'}</td>
+              <td>{formatDuration(s.total_stoppage_s)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 function BilletsTable({ billets }) {
@@ -248,13 +328,32 @@ function BilletsTable({ billets }) {
 }
 
 function PressUptimeView({ onBackToDefault }) {
-  const [windowHours, setWindowHours] = useState(24);
-  const { status, uptime, breakdown, billets, isLoading, error } = usePressUptime(windowHours);
+  const [shiftParams, setShiftParams] = useState(null); // null = let the server pick the current shift
+  const [showStoppages, setShowStoppages] = useState(false);
+  const { status, uptime, breakdown, billets, stoppages, isLoading, error } = usePressUptime(shiftParams);
+
+  // Captures the server's current-shift resolution once, so Prev/Next has
+  // a concrete (date, shift) to step from even before the user has picked
+  // one explicitly. Deliberately does NOT keep re-syncing after that - once
+  // a shift is selected (by this or by explicit navigation) the view stays
+  // pinned to it rather than jumping to a new "current" shift out from
+  // under the user as real time crosses a shift boundary.
+  useEffect(() => {
+    if (!shiftParams && uptime && uptime.date && uptime.shift) {
+      setShiftParams({ date: uptime.date, shift: uptime.shift });
+    }
+  }, [shiftParams, uptime]);
 
   const badge = uptime ? getStateBadge(uptime.current_state, uptime.current_reason) : null;
   const accounted = breakdown ? breakdown.accounted_seconds : null;
   const extrusionPct = breakdown && accounted ? (breakdown.extrusion_s / accounted) * 100 : null;
   const stoppagePct = breakdown && accounted ? (breakdown.stoppage_total_s / accounted) * 100 : null;
+
+  const handleNavigate = (direction) => {
+    const base = shiftParams || (uptime ? { date: uptime.date, shift: uptime.shift } : null);
+    if (!base) return;
+    setShiftParams(shiftStep(base.date, base.shift, direction));
+  };
 
   return (
     <div className="container">
@@ -288,21 +387,27 @@ function PressUptimeView({ onBackToDefault }) {
             </div>
           )}
 
-          <div className="window-picker">
-            {WINDOW_OPTIONS.map((opt) => (
-              <button
-                key={opt.label}
-                className={opt.hours === windowHours ? 'window-picker-btn active' : 'window-picker-btn'}
-                onClick={() => setWindowHours(opt.hours)}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
+          <ShiftPicker
+            date={shiftParams ? shiftParams.date : uptime && uptime.date}
+            shift={shiftParams ? shiftParams.shift : uptime && uptime.shift}
+            isCurrent={shiftParams === null}
+            onNavigate={handleNavigate}
+            onJumpToCurrent={() => setShiftParams(null)}
+          />
 
           <div className="stat-grid">
             <StatCard label="Extruding" value={extrusionPct !== null ? `${extrusionPct.toFixed(1)}%` : '—'} />
-            <StatCard label="Stoppage" value={stoppagePct !== null ? `${stoppagePct.toFixed(1)}%` : '—'} />
+            <StatCard
+              label="Downtime Total"
+              value={breakdown ? formatDuration(breakdown.stoppage_total_s) : '—'}
+              sub={
+                stoppagePct !== null
+                  ? `${stoppagePct.toFixed(1)}% · ${stoppages.length} instance${stoppages.length === 1 ? '' : 's'}`
+                  : undefined
+              }
+              onClick={() => setShowStoppages((v) => !v)}
+              expanded={showStoppages}
+            />
             <StatCard label="Billets" value={breakdown ? breakdown.billet_count : '—'} />
             <StatCard
               label="Last Billet"
@@ -310,6 +415,19 @@ function PressUptimeView({ onBackToDefault }) {
               sub={status ? `${formatDuration(status.seconds_since_last_billet)} ago` : undefined}
             />
           </div>
+
+          {showStoppages && (
+            <div className="stoppages-panel">
+              <h3>Downtime Instances</h3>
+              <p className="stat-sub">
+                Unexplained stoppages this shift - each tied to the specific billet it happened around
+                (a gap before it beyond that profile/die's normal baseline, or ram speed reading ~0
+                mid-extrusion). Does not include Automatic Mode being off for a known reason
+                (Emergency/Setup/Manual/Die Change) - see the Automatic Mode section below for that.
+              </p>
+              <StoppagesTable stoppages={stoppages} />
+            </div>
+          )}
 
           <h3>Production Cycle Breakdown</h3>
           <p className="stat-sub">
@@ -322,12 +440,13 @@ function PressUptimeView({ onBackToDefault }) {
           <h3>Automatic Mode: Uptime vs Downtime</h3>
           <p className="stat-sub">
             The press's control-mode timeline (Automatic Mode Active) - stays "up" through the normal
-            gap between billets, so this is a coarser signal than the breakdown above.
+            gap between billets, so this is a coarser, different signal than the breakdown above (it
+            can't tell you which billet a stoppage happened around).
           </p>
           <div className="stat-grid">
             <StatCard label="Uptime" value={uptime && uptime.uptime_pct !== null ? `${uptime.uptime_pct}%` : '—'} />
             <StatCard label="Uptime Total" value={uptime ? formatDuration(uptime.uptime_seconds) : '—'} />
-            <StatCard label="Downtime Total" value={uptime ? formatDuration(uptime.downtime_seconds) : '—'} />
+            <StatCard label="Non-Automatic Total" value={uptime ? formatDuration(uptime.downtime_seconds) : '—'} />
           </div>
           <UptimeBar uptime={uptime} />
 
