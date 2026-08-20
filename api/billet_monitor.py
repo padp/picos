@@ -206,6 +206,42 @@ def _billet_key(job_number, billet_no_order, billet_no_die):
     return f"{job_number or 'unknown'}|{_fmt(billet_no_order)}|{_fmt(billet_no_die)}"
 
 
+def gap_baseline(db, profile, die_copy):
+    """Mean/std of this (profile, die_copy)'s recent normal (non-startup/
+    cleanout/die-change) between-billet gaps, or None if there isn't
+    enough history yet to trust one - see GAP_BASELINE_MIN_SAMPLES.
+
+    Module-level (not a Detector method) so app.py's live "is this stall
+    actually abnormal" check (/api/press/status) can call the exact same
+    baseline the poller itself scores completed gaps against, without
+    needing a Detector instance."""
+    cursor = db.billet_cycles.find(
+        {
+            "profile": profile,
+            "die_copy": die_copy,
+            "is_startup": False,
+            "is_cleanout": False,
+            "is_die_change": False,
+            "gap_before_s": {"$ne": None},
+        },
+        sort=[("ts", -1)],
+        limit=GAP_BASELINE_LOOKBACK,
+        projection={"gap_before_s": True},
+    )
+    samples = [min(row["gap_before_s"], GAP_BASELINE_CAP_S) for row in cursor]
+    if len(samples) < GAP_BASELINE_MIN_SAMPLES:
+        return None
+    mean = statistics.fmean(samples)
+    std = statistics.pstdev(samples, mean) if len(samples) > 1 else 0.0
+    return {"mean": mean, "std": std, "n": len(samples)}
+
+
+def expected_gap_s(baseline):
+    """The gap length beyond which a (profile, die_copy)'s baseline calls
+    it a stoppage rather than normal dead cycle time."""
+    return baseline["mean"] + GAP_BASELINE_Z_THRESHOLD * baseline["std"]
+
+
 class Detector:
     def __init__(self, db):
         self._db = db
@@ -334,31 +370,6 @@ class Detector:
                 self._die_change_flagged_during_gap = True
         self._prev_extrusion_active = active
 
-    def _gap_baseline(self, profile, die_copy):
-        """Mean/std of this (profile, die_copy)'s recent normal
-        (non-startup/cleanout/die-change) between-billet gaps, or None if
-        there isn't enough history yet to trust one - see
-        GAP_BASELINE_MIN_SAMPLES."""
-        cursor = self._db.billet_cycles.find(
-            {
-                "profile": profile,
-                "die_copy": die_copy,
-                "is_startup": False,
-                "is_cleanout": False,
-                "is_die_change": False,
-                "gap_before_s": {"$ne": None},
-            },
-            sort=[("ts", -1)],
-            limit=GAP_BASELINE_LOOKBACK,
-            projection={"gap_before_s": True},
-        )
-        samples = [min(row["gap_before_s"], GAP_BASELINE_CAP_S) for row in cursor]
-        if len(samples) < GAP_BASELINE_MIN_SAMPLES:
-            return None
-        mean = statistics.fmean(samples)
-        std = statistics.pstdev(samples, mean) if len(samples) > 1 else 0.0
-        return {"mean": mean, "std": std, "n": len(samples)}
-
     def _classify_gap(self, profile, die_copy, gap_before_s, is_startup, is_cleanout, is_die_change):
         """Splits gap_before_s into (dead_cycle_s, stoppage_s). Startup/
         cleanout/die-change gaps are expected in full - see this module's
@@ -367,10 +378,10 @@ class Detector:
             return None, None
         if is_startup or is_cleanout or is_die_change:
             return gap_before_s, 0.0
-        baseline = self._gap_baseline(profile, die_copy)
+        baseline = gap_baseline(self._db, profile, die_copy)
         if baseline is None:
             return gap_before_s, 0.0  # not enough history for this profile/die yet - don't guess
-        expected = baseline["mean"] + GAP_BASELINE_Z_THRESHOLD * baseline["std"]
+        expected = expected_gap_s(baseline)
         dead_cycle_s = min(gap_before_s, expected)
         stoppage_s = max(0.0, gap_before_s - expected)
         return dead_cycle_s, stoppage_s

@@ -10,11 +10,16 @@ from db import ensure_indexes, get_db
 app = Flask(__name__)
 CORS(app)
 
-# Mirrors Granco Saw Monitor's /api/status stall detection - flags when
-# the press claims to be RUNNING but hasn't finished a billet in far
-# longer than a normal cycle would take (billet_monitor.py's collector is
-# down, or the press really is stuck mid-cycle).
-BILLET_STALL_THRESHOLD_S = 10 * 60
+# Fallback "stalled" threshold only for when this profile/die has no gap
+# baseline yet (see billet_monitor.gap_baseline) - once one exists,
+# press_status() scores the live gap against it instead, the same way
+# billet_monitor.py scores a completed one. A fixed threshold alone was
+# wrong: it fired on a large profile mid-way through a single normal long
+# extrusion (seconds_since_last_billet counts from the PREVIOUS billet's
+# completion, so a >10min extrusion in progress looked identical to a
+# >10min real stall), and it couldn't tell a fast-cycling small profile's
+# genuinely-stuck 3 minutes from a slow profile's completely normal one.
+BILLET_STALL_FALLBACK_THRESHOLD_S = 10 * 60
 MAX_UPTIME_WINDOW_HOURS = 24 * 30
 
 if os.environ.get("SQL_PASS"):
@@ -41,22 +46,49 @@ def get_data():
 
 @app.get("/api/press/status")
 def press_status():
+    """"stalled" here means a genuinely abnormal gap - never true while
+    Extrusion Active is live (that's just a billet still mid-stroke, no
+    matter how long it's been since the last one *completed*), and scored
+    against this profile/die's own baseline (the same one billet_monitor.py
+    scores completed gaps against) rather than one fixed threshold, so a
+    fast-cycling small profile and a slow large one are each judged against
+    what's actually normal for them."""
     db = get_db()
     latest_state = db.state_events.find_one(sort=[("ts_start", -1)], projection={"_id": False})
     latest_billet = db.billet_cycles.find_one(sort=[("ts", -1)], projection={"_id": False})
+    live = db.press_data.find_one(
+        {},
+        projection={
+            billet_monitor.FLD_EXTRUSION_ACTIVE: True,
+            billet_monitor.FLD_PROFILE: True,
+            billet_monitor.FLD_DIE_COPY: True,
+        },
+    )
+    extrusion_active = bool(live.get(billet_monitor.FLD_EXTRUSION_ACTIVE)) if live else None
 
     seconds_since_last_billet = None
+    expected_gap_s = None
     stalled = False
     if latest_billet and latest_billet.get("ts"):
         last_billet_ts = datetime.fromisoformat(latest_billet["ts"])
         seconds_since_last_billet = (datetime.now() - last_billet_ts).total_seconds()
         is_running = bool(latest_state) and latest_state.get("state") == billet_monitor.RUNNING
-        stalled = is_running and seconds_since_last_billet > BILLET_STALL_THRESHOLD_S
+
+        if is_running and not extrusion_active:
+            profile = live.get(billet_monitor.FLD_PROFILE) if live else None
+            die_copy = live.get(billet_monitor.FLD_DIE_COPY) if live else None
+            baseline = billet_monitor.gap_baseline(db, profile, die_copy) if profile is not None else None
+            expected_gap_s = (
+                billet_monitor.expected_gap_s(baseline) if baseline else BILLET_STALL_FALLBACK_THRESHOLD_S
+            )
+            stalled = seconds_since_last_billet > expected_gap_s
 
     return jsonify(
         state=latest_state,
         latest_billet=latest_billet,
         seconds_since_last_billet=seconds_since_last_billet,
+        extrusion_active=extrusion_active,
+        expected_gap_s=expected_gap_s,
         stalled=stalled,
     )
 

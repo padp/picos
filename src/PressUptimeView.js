@@ -280,8 +280,11 @@ function PressUptimeView({ onBackToDefault }) {
 
           {status && status.stalled && (
             <div className="stall-banner">
-              ⚠ Press is in Automatic but hasn't completed a billet in{' '}
-              {formatDuration(status.seconds_since_last_billet)} — possible stall.
+              ⚠ No billet completed in {formatDuration(status.seconds_since_last_billet)}
+              {status.expected_gap_s
+                ? ` — this profile/die normally goes about ${formatDuration(status.expected_gap_s)} between billets`
+                : ''}{' '}
+              — possible stoppage.
             </div>
           )}
 
