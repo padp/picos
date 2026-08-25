@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import usePressUptime from './usePressUptime';
 
 // RUNNING and the muted "no data" cases are fixed status colors; each
@@ -269,29 +269,97 @@ function StoppagesTable({ stoppages }) {
   );
 }
 
+const BILLET_FILTER_COLUMNS = [
+  { key: 'job_number', label: 'Job #', getValue: (b) => b.job_number },
+  { key: 'die_copy', label: 'Die', getValue: (b) => (b.die_copy === undefined || b.die_copy === null ? null : String(b.die_copy)) },
+  { key: 'alloy_name', label: 'Alloy', getValue: (b) => b.alloy_name },
+  { key: 'gapType', label: 'Gap type', getValue: (b) => { const tag = gapTag(b); return tag ? tag.label : null; } },
+];
+
+const ALL_FILTER = 'All';
+
 function BilletsTable({ billets }) {
+  const [filters, setFilters] = useState({});
+
+  const filterOptions = useMemo(() => {
+    const options = {};
+    BILLET_FILTER_COLUMNS.forEach(({ key, getValue }) => {
+      const values = new Set();
+      (billets || []).forEach((b) => {
+        const v = getValue(b);
+        if (v !== null && v !== undefined && v !== '') values.add(v);
+      });
+      options[key] = Array.from(values).sort();
+    });
+    return options;
+  }, [billets]);
+
+  const filteredBillets = useMemo(() => {
+    return (billets || []).filter((b) =>
+      BILLET_FILTER_COLUMNS.every(({ key, getValue }) => {
+        const active = filters[key];
+        if (!active || active === ALL_FILTER) return true;
+        return getValue(b) === active;
+      })
+    );
+  }, [billets, filters]);
+
+  const setFilter = (key, value) => setFilters((prev) => ({ ...prev, [key]: value }));
+  const clearFilters = () => setFilters({});
+  const activeFilterCount = Object.values(filters).filter((v) => v && v !== ALL_FILTER).length;
+
   if (!billets || billets.length === 0) {
     return <p>No billet cycles recorded yet.</p>;
   }
+
   return (
-    <div className="billets-table-wrap">
-      <table className="billets-table">
-        <thead>
-          <tr>
-            <th>Time</th>
-            <th>Billet</th>
-            <th>Job #</th>
-            <th>Die</th>
-            <th>Alloy</th>
-            <th>Length (in)</th>
-            <th>Extrusion (s)</th>
-            <th>Gap (s)</th>
-            <th>Gap type</th>
-            <th>Peak Force (UST)</th>
-          </tr>
-        </thead>
-        <tbody>
-          {billets.map((b) => {
+    <div>
+      <div className="table-filters">
+        {BILLET_FILTER_COLUMNS.map(({ key, label }) => (
+          <label className="table-filter" key={key}>
+            {label}
+            <select value={filters[key] || ALL_FILTER} onChange={(e) => setFilter(key, e.target.value)}>
+              <option value={ALL_FILTER}>All</option>
+              {filterOptions[key].map((v) => (
+                <option key={v} value={v}>
+                  {v}
+                </option>
+              ))}
+            </select>
+          </label>
+        ))}
+        {activeFilterCount > 0 && (
+          <button className="secondary-button" onClick={clearFilters}>
+            Clear filters
+          </button>
+        )}
+      </div>
+      {activeFilterCount > 0 && (
+        <p className="stat-sub">
+          Showing {filteredBillets.length} of {billets.length} billets.
+        </p>
+      )}
+      {filteredBillets.length === 0 ? (
+        <p>No billets match these filters.</p>
+      ) : (
+      <div className="billets-table-wrap">
+        <table className="billets-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Billet</th>
+              <th>Job #</th>
+              <th>Die</th>
+              <th>Alloy</th>
+              <th>Length (in)</th>
+              <th>Extrusion (s)</th>
+              <th>Gap (s)</th>
+              <th>Gap type</th>
+              <th>Peak Force (UST)</th>
+            </tr>
+          </thead>
+          <tbody>
+          {filteredBillets.map((b) => {
             const tag = gapTag(b);
             const stallNote = b.in_billet_stall_s > 0 ? ` (+${formatNumber(b.in_billet_stall_s, 0)}s mid-stall)` : '';
             return (
@@ -321,8 +389,10 @@ function BilletsTable({ billets }) {
               </tr>
             );
           })}
-        </tbody>
-      </table>
+          </tbody>
+        </table>
+      </div>
+      )}
     </div>
   );
 }

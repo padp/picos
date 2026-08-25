@@ -439,3 +439,34 @@ input[type="text"]:focus, input[type="number"]:focus {
   border-radius: 10px;
   white-space: nowrap;
 }
+
+.table-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 15px;
+  margin: 15px 0 10px;
+}
+
+.table-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #7f8c8d;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+}
+
+.table-filter select {
+  padding: 6px 10px;
+  border: 1px solid #d6dbdf;
+  border-radius: 5px;
+  font-size: 13px;
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: normal;
+  color: #2c3e50;
+  background-color: #fff;
+}
