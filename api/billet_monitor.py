@@ -42,11 +42,22 @@ numbers agree rather than drifting apart:
     family (6005/6008/6082) into a different family - these presses
     need a physical container cleanout for that, unrelated to a normal
     per-billet gap or an actual fault.
-  - die_change_s: a gap where the Die Copy value itself changed, or
-    "Die Change Active" was flagged at some point during the gap.
+  - die_change_s: the gap between the last billet of one die and the
+    first billet of the next, identified by the Die Copy value itself
+    changing between two consecutive billets. NOT the "Die Change
+    Active" PLC flag - confirmed live that flag can pulse during the
+    gap *before* the outgoing die's last billet rather than before the
+    incoming die's first one, misattributing the time to the wrong
+    billet; Die Copy actually changing is the ground truth for when the
+    swap happened.
+  - startup_s: NOT a gap at all - how much LONGER the first billet of a
+    run's own extrusion took than this (profile, die_copy)'s normal
+    extrusion duration (e.g. thermal ramp-up). The gap *before* that
+    first billet is classified the same as any other (dead_cycle_s/
+    stoppage_s, or cleanout_s/die_change_s if it's also one of those).
   - stoppage_s: whatever's left over beyond the baseline once
-    startup/cleanout/die-change are excluded - a genuine, unexplained
-    stall *before* a billet starts.
+    cleanout/die-change are excluded - a genuine, unexplained stall
+    *before* a billet starts.
   - in_billet_stall_s: ram speed reading ~0 while Extrusion Active was
     still true - a stall *during* a billet, not between them.
 
@@ -222,10 +233,13 @@ def _billet_key(job_number, billet_no_order, billet_no_die):
     return f"{job_number or 'unknown'}|{_fmt(billet_no_order)}|{_fmt(billet_no_die)}"
 
 
-def gap_baseline(db, profile, die_copy):
+def field_baseline(db, profile, die_copy, field):
     """Mean/std of this (profile, die_copy)'s recent normal (non-startup/
-    cleanout/die-change) between-billet gaps, or None if there isn't
-    enough history yet to trust one - see GAP_BASELINE_MIN_SAMPLES.
+    cleanout/die-change) values for `field`, or None if there isn't
+    enough history yet to trust one - see GAP_BASELINE_MIN_SAMPLES. Used
+    for gap_before_s (is this gap abnormally long -> stoppage_s) and,
+    only for the first billet of a run, extrusion_duration_s (is THIS
+    billet's own extrusion abnormally long -> startup_s).
 
     Module-level (not a Detector method) so app.py's live "is this stall
     actually abnormal" check (/api/press/status) can call the exact same
@@ -238,18 +252,24 @@ def gap_baseline(db, profile, die_copy):
             "is_startup": False,
             "is_cleanout": False,
             "is_die_change": False,
-            "gap_before_s": {"$ne": None},
+            field: {"$ne": None},
         },
         sort=[("ts", -1)],
         limit=GAP_BASELINE_LOOKBACK,
-        projection={"gap_before_s": True},
+        projection={field: True},
     )
-    samples = [min(row["gap_before_s"], GAP_BASELINE_CAP_S) for row in cursor]
+    samples = [min(row[field], GAP_BASELINE_CAP_S) for row in cursor]
     if len(samples) < GAP_BASELINE_MIN_SAMPLES:
         return None
     mean = statistics.fmean(samples)
     std = statistics.pstdev(samples, mean) if len(samples) > 1 else 0.0
     return {"mean": mean, "std": std, "n": len(samples)}
+
+
+def gap_baseline(db, profile, die_copy):
+    """Thin wrapper for callers (app.py's live stall check) that only
+    care about the gap-duration baseline specifically."""
+    return field_baseline(db, profile, die_copy, "gap_before_s")
 
 
 def expected_gap_s(baseline):
@@ -267,7 +287,6 @@ class Detector:
         self._last_billet_ts = None
         self._extrusion_start_ts = None
         self._in_billet_stall_s = 0.0
-        self._die_change_flagged_during_gap = False
         self._peaks = {name: None for name, _field in _PEAK_FIELDS}
 
         # Staleness is judged by whether press_data's own Date/Time value
@@ -376,24 +395,19 @@ class Detector:
             ram_speed = doc.get(FLD_STEM_SPEED)
             if ram_speed is not None and abs(ram_speed) <= STALL_RAM_SPEED_EPSILON:
                 self._in_billet_stall_s += POLL_INTERVAL_S
-        else:
-            if self._prev_extrusion_active:
-                self._emit_billet_cycle(ts, doc)
-            elif doc.get(FLD_DIE_CHANGE):
-                # Only meaningful between billets - a die change can't
-                # start mid-extrusion, and _emit_billet_cycle resets this
-                # flag once it's been consumed by the billet it applies to.
-                self._die_change_flagged_during_gap = True
+        elif self._prev_extrusion_active:
+            self._emit_billet_cycle(ts, doc)
         self._prev_extrusion_active = active
 
-    def _classify_gap(self, profile, die_copy, gap_before_s, is_startup, is_cleanout, is_die_change):
-        """Splits gap_before_s into (dead_cycle_s, stoppage_s). Startup/
-        cleanout/die-change gaps are expected in full - see this module's
-        docstring - so they're not scored against the baseline at all."""
+    def _classify_gap(self, profile, die_copy, gap_before_s):
+        """Splits a normal (non-cleanout/die-change) gap_before_s into
+        (dead_cycle_s, stoppage_s), scored against this (profile,
+        die_copy)'s own recent baseline. A startup billet's gap is scored
+        here too now - see this module's docstring on startup_s - unless
+        it's ALSO a cleanout/die-change gap, which the caller keeps out
+        of baseline scoring entirely."""
         if gap_before_s is None:
             return None, None
-        if is_startup or is_cleanout or is_die_change:
-            return gap_before_s, 0.0
         baseline = gap_baseline(self._db, profile, die_copy)
         if baseline is None:
             return gap_before_s, 0.0  # not enough history for this profile/die yet - don't guess
@@ -433,14 +447,29 @@ class Detector:
             or job_number != self._prev_billet_job_number
             or (billet_no_order is not None and billet_no_order <= 1)
         )
-        is_cleanout = (not is_startup) and is_cleanout_cycle(self._prev_billet_alloy, alloy_code)
-        is_die_change = (not is_startup) and not is_cleanout and (
-            (die_copy is not None and self._prev_billet_die_copy is not None and die_copy != self._prev_billet_die_copy)
-            or self._die_change_flagged_during_gap
+        # Cleanout/die-change classify the GAP independent of is_startup
+        # now - a new job's first billet can ALSO be the first billet of
+        # a new die, and that transition gap belongs to die_change_s, not
+        # startup (which isn't gap-based anymore - see below).
+        is_cleanout = is_cleanout_cycle(self._prev_billet_alloy, alloy_code)
+        is_die_change = (not is_cleanout) and (
+            die_copy is not None and self._prev_billet_die_copy is not None and die_copy != self._prev_billet_die_copy
         )
-        dead_cycle_s, stoppage_s = self._classify_gap(
-            profile, die_copy, gap_before_s, is_startup, is_cleanout, is_die_change
-        )
+        if is_cleanout or is_die_change:
+            dead_cycle_s, stoppage_s = gap_before_s, 0.0
+        else:
+            dead_cycle_s, stoppage_s = self._classify_gap(profile, die_copy, gap_before_s)
+
+        # Startup: not the gap before this billet at all - how much
+        # LONGER this billet's own extrusion took than this (profile,
+        # die_copy)'s normal extrusion duration (e.g. thermal ramp-up on
+        # the first billet of a run). Zero unless there's enough history
+        # to know what "normal" is - don't guess.
+        startup_s = 0.0
+        if is_startup and extrusion_duration_s is not None:
+            duration_baseline = field_baseline(self._db, profile, die_copy, "extrusion_duration_s")
+            if duration_baseline is not None:
+                startup_s = max(0.0, extrusion_duration_s - duration_baseline["mean"])
 
         row = {
             "billet_key": _billet_key(job_number, billet_no_order, billet_no_die),
@@ -465,6 +494,7 @@ class Detector:
             "gap_before_s": gap_before_s,
             "dead_cycle_s": dead_cycle_s,
             "stoppage_s": stoppage_s,
+            "startup_s": startup_s,
             "in_billet_stall_s": round(self._in_billet_stall_s, 1),
             "is_startup": is_startup,
             "is_cleanout": is_cleanout,
@@ -479,7 +509,6 @@ class Detector:
         self._prev_billet_job_number = job_number
         self._prev_billet_alloy = alloy_code
         self._prev_billet_die_copy = die_copy
-        self._die_change_flagged_during_gap = False
 
 
 def run_poll_loop():

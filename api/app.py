@@ -82,7 +82,15 @@ if os.environ.get("SQL_PASS"):
     # also happens under gunicorn, not just `python app.py`. Same guard
     # Granco Saw Monitor's api/app.py uses.
     ensure_indexes()
-    billet_monitor.start_background_poller()
+    # state_events has no uniqueness constraint (unlike billet_cycles'
+    # upsert-on-billet_key), so a second poller instance pointed at the
+    # same production DB - e.g. a local dev copy of this app running
+    # alongside the real Render deployment - writes its own independent,
+    # overlapping RUNNING/IDLE stream instead of being deduplicated,
+    # double-counting real time. POLL_DISABLED lets a local/dev instance
+    # serve reads against production Mongo without also polling it.
+    if not os.environ.get("POLL_DISABLED"):
+        billet_monitor.start_background_poller()
 
 
 @app.get("/")
@@ -191,12 +199,6 @@ def stoppages():
     return jsonify(date=date_str, shift=shift_name, stoppages=rows)
 
 
-def _clipped_seconds(ts_start_iso, ts_end_iso, window_start, window_end):
-    start = max(datetime.fromisoformat(ts_start_iso), window_start)
-    end = min(datetime.fromisoformat(ts_end_iso) if ts_end_iso else window_end, window_end)
-    return max((end - start).total_seconds(), 0.0)
-
-
 @app.get("/api/press/uptime")
 def press_uptime():
     """Total RUNNING (uptime) vs IDLE (downtime, broken down by reason)
@@ -205,7 +207,19 @@ def press_uptime():
     press's "Automatic Mode Active" tag instead of the saw's AUTO_MODE
     (see billet_monitor.py). uptime_pct is against the covered portion of
     the window (excludes any UNKNOWN/no-data gap, e.g. before this
-    feature was deployed), not the raw window length."""
+    feature was deployed), not the raw window length.
+
+    state_events has no uniqueness constraint (unlike billet_cycles'
+    upsert-on-billet_key), so a second poller instance pointed at the same
+    production DB - e.g. a local dev copy of this app run alongside the
+    real deployment without POLL_DISABLED - writes its own independent,
+    overlapping RUNNING/IDLE stream instead of being deduplicated. Rather
+    than trust the stored events to already be a clean non-overlapping
+    timeline, this coalesces them into one before summing: events are
+    clipped to the window and sorted by start, and each only contributes
+    the portion of its span not already covered by an earlier-starting
+    event, so an exact or partial duplicate contributes zero (or just its
+    new portion) instead of double-counting real time."""
     date_str, shift_name, window_start, window_end = _resolve_shift_params()
 
     db = get_db()
@@ -215,18 +229,31 @@ def press_uptime():
         projection={"_id": False},
     )
 
+    intervals = []
+    for event in events:
+        start = max(datetime.fromisoformat(event["ts_start"]), window_start)
+        end = min(datetime.fromisoformat(event["ts_end"]) if event.get("ts_end") else window_end, window_end)
+        if end > start:
+            intervals.append((start, end, event["state"], event.get("reason")))
+    intervals.sort(key=lambda iv: iv[0])
+
     uptime_seconds = 0.0
     downtime_by_reason = {}
     unknown_seconds = 0.0
-    for event in events:
-        secs = _clipped_seconds(event["ts_start"], event.get("ts_end"), window_start, window_end)
-        if event["state"] == billet_monitor.RUNNING:
+    covered_until = window_start
+    for start, end, state, reason in intervals:
+        eff_start = max(start, covered_until)
+        if end <= eff_start:
+            continue
+        secs = (end - eff_start).total_seconds()
+        if state == billet_monitor.RUNNING:
             uptime_seconds += secs
-        elif event["state"] == billet_monitor.IDLE:
-            reason = event.get("reason") or "Unspecified"
+        elif state == billet_monitor.IDLE:
+            reason = reason or "Unspecified"
             downtime_by_reason[reason] = downtime_by_reason.get(reason, 0.0) + secs
         else:
             unknown_seconds += secs
+        covered_until = max(covered_until, end)
 
     downtime_seconds = sum(downtime_by_reason.values())
     covered_seconds = uptime_seconds + downtime_seconds + unknown_seconds
@@ -263,7 +290,14 @@ def cycle_breakdown():
     stoppage_total_s combines stoppage_s (an abnormally long gap *before*
     a billet, beyond that profile/die's own recent baseline) and
     in_billet_stall_s (ram speed reading ~0 *during* a billet) - both are
-    real, unexplained stalls, just at different points in the cycle."""
+    real, unexplained stalls, just at different points in the cycle.
+
+    startup_s is NOT gap time - it's how much LONGER a run's first billet
+    took to extrude than normal (see billet_monitor.py's module
+    docstring), so it's a subset of that billet's own extrusion_duration_s
+    rather than additional elapsed time. extrusion_s below is the
+    remainder after pulling startup_s back out, so the totals still sum
+    to the shift's real elapsed time without double-counting it."""
     date_str, shift_name, window_start, window_end = _resolve_shift_params()
 
     db = get_db()
@@ -271,8 +305,8 @@ def cycle_breakdown():
         {"ts": {"$gte": window_start.isoformat(), "$lt": window_end.isoformat()}},
         projection={
             "_id": False, "extrusion_duration_s": True, "gap_before_s": True,
-            "dead_cycle_s": True, "stoppage_s": True, "in_billet_stall_s": True,
-            "is_startup": True, "is_cleanout": True, "is_die_change": True,
+            "dead_cycle_s": True, "stoppage_s": True, "startup_s": True,
+            "in_billet_stall_s": True, "is_cleanout": True, "is_die_change": True,
         },
     ))
 
@@ -281,12 +315,12 @@ def cycle_breakdown():
         "die_change_s": 0.0, "startup_s": 0.0, "stoppage_s": 0.0, "in_billet_stall_s": 0.0,
     }
     for b in billets:
-        totals["extrusion_s"] += b.get("extrusion_duration_s") or 0.0
+        startup = b.get("startup_s") or 0.0
+        totals["extrusion_s"] += (b.get("extrusion_duration_s") or 0.0) - startup
+        totals["startup_s"] += startup
         totals["in_billet_stall_s"] += b.get("in_billet_stall_s") or 0.0
         gap = b.get("gap_before_s") or 0.0
-        if b.get("is_startup"):
-            totals["startup_s"] += gap
-        elif b.get("is_cleanout"):
+        if b.get("is_cleanout"):
             totals["cleanout_s"] += gap
         elif b.get("is_die_change"):
             totals["die_change_s"] += gap

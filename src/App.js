@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import DataDisplay from './DataDisplay';
 import DefaultView from './DefaultView';
 import PressUptimeView from './PressUptimeView';
+import OperatorMonitorView from './OperatorMonitorView';
 import usePressData from './usePressData';
 import { DEFAULT_PAUSE_TIME } from './Constants';
 
@@ -14,49 +15,57 @@ const loadFromLocalStorage = (key, defaultValue) => {
   return saved ? JSON.parse(saved) : defaultValue;
 };
 
-// A hash route (not a clean /monitor path) - this deploys to GitHub Pages,
-// which serves static files with no server-side rewrite support. A clean
-// path 404s on refresh/direct link unless a 404.html SPA-redirect shim is
-// added; a hash never leaves the client, so #/monitor works with zero
-// extra hosting config. Deliberately NOT persisted as the sticky default
-// view (see the mode !== 'uptime' guard below) - landing here should
-// always be an explicit destination (the nav button or a shared link),
+// Hash routes (not clean paths) - this deploys to GitHub Pages, which
+// serves static files with no server-side rewrite support. A clean path
+// 404s on refresh/direct link unless a 404.html SPA-redirect shim is
+// added; a hash never leaves the client, so these work with zero extra
+// hosting config. Deliberately NOT persisted as the sticky default view
+// (see the HASH_MODES guard below) - landing on one should always be an
+// explicit destination (a nav button or a shared/bookmarked link, e.g.
+// the operator kiosk display pointed straight at #/operator-monitor),
 // never something last-viewed-state silently reopens to.
-const MONITOR_HASH = '#/monitor';
+const HASH_ROUTES = {
+  '#/monitor': 'uptime',
+  '#/operator-monitor': 'operator',
+};
+const HASH_MODES = new Set(Object.values(HASH_ROUTES));
+const TITLES = {
+  uptime: 'Press Monitor',
+  operator: 'Press Operator Monitor',
+};
 
 function App() {
-  const [mode, setMode] = useState(() =>
-    window.location.hash === MONITOR_HASH ? 'uptime' : loadFromLocalStorage('viewMode', 'default')
-  );
+  const [mode, setMode] = useState(() => HASH_ROUTES[window.location.hash] || loadFromLocalStorage('viewMode', 'default'));
   const [intervalTime, setIntervalTime] = useState(DEFAULT_PAUSE_TIME);
   const { data, isLoading } = usePressData(intervalTime);
 
   useEffect(() => {
-    if (mode !== 'uptime') {
+    if (!HASH_MODES.has(mode)) {
       saveToLocalStorage('viewMode', mode);
     }
-    document.title = mode === 'uptime' ? 'Press Monitor' : 'Press 2 Datastream';
+    document.title = TITLES[mode] || 'Press 2 Datastream';
   }, [mode]);
 
   useEffect(() => {
     const onHashChange = () => {
-      if (window.location.hash === MONITOR_HASH) {
-        setMode('uptime');
+      const routedMode = HASH_ROUTES[window.location.hash];
+      if (routedMode) {
+        setMode(routedMode);
       } else {
-        setMode((current) => (current === 'uptime' ? loadFromLocalStorage('viewMode', 'default') : current));
+        setMode((current) => (HASH_MODES.has(current) ? loadFromLocalStorage('viewMode', 'default') : current));
       }
     };
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
 
-  const goToMonitor = () => {
-    window.location.hash = '/monitor';
-    setMode('uptime');
+  const goToRoute = (hash, targetMode) => {
+    window.location.hash = hash;
+    setMode(targetMode);
   };
 
-  const leaveMonitor = () => {
-    if (window.location.hash === MONITOR_HASH) {
+  const leaveRoute = () => {
+    if (HASH_MODES.has(mode)) {
       window.history.pushState('', document.title, window.location.pathname + window.location.search);
     }
     setMode('default');
@@ -69,10 +78,15 @@ function App() {
           data={data}
           isLoading={isLoading}
           onBuildInterface={() => setMode('builder')}
-          onViewUptime={goToMonitor}
+          onViewUptime={() => goToRoute('/monitor', 'uptime')}
         />
       ) : mode === 'uptime' ? (
-        <PressUptimeView onBackToDefault={leaveMonitor} />
+        <PressUptimeView
+          onBackToDefault={leaveRoute}
+          onOpenOperatorView={() => goToRoute('/operator-monitor', 'operator')}
+        />
+      ) : mode === 'operator' ? (
+        <OperatorMonitorView onBackToDefault={leaveRoute} />
       ) : (
         <DataDisplay
           data={data}

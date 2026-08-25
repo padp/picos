@@ -32,7 +32,7 @@ function DefaultView({ data, isLoading, onBuildInterface, onViewUptime }) {
             Billet Cycles &amp; Uptime &rarr;
           </button>
           <button className="secondary-button" onClick={onBuildInterface}>
-            Build Your Interface &rarr;
+            Customize Your Interface &rarr;
           </button>
         </div>
       </div>
