@@ -19,7 +19,7 @@ function StatCard({ label, value }) {
   );
 }
 
-function DefaultView({ data, isLoading, onBuildInterface, onViewUptime }) {
+function DefaultView({ data, isLoading, onBuildInterface, onViewUptime, onViewAlerts }) {
   const hasData = Object.keys(data).length > 0;
   const status = hasData ? getPressStatus(data) : null;
 
@@ -30,6 +30,9 @@ function DefaultView({ data, isLoading, onBuildInterface, onViewUptime }) {
         <div>
           <button className="secondary-button" onClick={onViewUptime}>
             Billet Cycles &amp; Uptime &rarr;
+          </button>
+          <button className="secondary-button" onClick={onViewAlerts}>
+            Alerts &rarr;
           </button>
           <button className="secondary-button" onClick={onBuildInterface}>
             Customize Your Interface &rarr;

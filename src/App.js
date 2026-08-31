@@ -3,6 +3,7 @@ import DataDisplay from './DataDisplay';
 import DefaultView from './DefaultView';
 import PressUptimeView from './PressUptimeView';
 import OperatorMonitorView from './OperatorMonitorView';
+import AlertsView from './AlertsView';
 import usePressData from './usePressData';
 import { DEFAULT_PAUSE_TIME } from './Constants';
 
@@ -32,6 +33,7 @@ const HASH_MODES = new Set(Object.values(HASH_ROUTES));
 const TITLES = {
   uptime: 'Press Monitor',
   operator: 'Press Operator Monitor',
+  alerts: 'Press Alerts',
 };
 
 function App() {
@@ -79,6 +81,7 @@ function App() {
           isLoading={isLoading}
           onBuildInterface={() => setMode('builder')}
           onViewUptime={() => goToRoute('/monitor', 'uptime')}
+          onViewAlerts={() => setMode('alerts')}
         />
       ) : mode === 'uptime' ? (
         <PressUptimeView
@@ -87,6 +90,8 @@ function App() {
         />
       ) : mode === 'operator' ? (
         <OperatorMonitorView onBackToDefault={leaveRoute} />
+      ) : mode === 'alerts' ? (
+        <AlertsView onBackToDefault={() => setMode('default')} />
       ) : (
         <DataDisplay
           data={data}

@@ -39,3 +39,4 @@ def ensure_indexes():
     # query (recent same-profile-and-die rows, newest first).
     db.billet_cycles.create_index([("profile", 1), ("die_copy", 1), ("ts", -1)])
     db.state_events.create_index("ts_start")
+    db.alert_rules.create_index("topic", unique=True)

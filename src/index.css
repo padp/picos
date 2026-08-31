@@ -560,3 +560,128 @@ input[type="text"]:focus, input[type="number"]:focus {
     padding-top: 15px;
   }
 }
+
+/* Alerts View */
+.preset-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 10px 0;
+}
+
+.trigger-builder {
+  background-color: #f9fafb;
+  border: 1px solid #e1e0d9;
+  border-radius: 8px;
+  padding: 15px 20px;
+  margin: 10px 0;
+}
+
+.trigger-form-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 15px;
+}
+
+.trigger-form-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: #7f8c8d;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.trigger-form-row .trigger-field-label {
+  flex: 1 1 260px;
+  min-width: 220px;
+}
+
+.trigger-form-row input,
+.trigger-form-row select {
+  text-transform: none;
+  font-size: 15px;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid #ccc;
+  border-radius: 5px;
+}
+
+.trigger-form-row input[list] {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.trigger-form-row .duration-input {
+  display: flex;
+  gap: 6px;
+}
+
+.trigger-form-row .duration-input input {
+  width: 70px;
+}
+
+.trigger-list {
+  list-style: none;
+  margin: 10px 0;
+  padding: 0;
+}
+
+.trigger-list-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  background-color: #eaf2f8;
+  border-radius: 6px;
+  padding: 8px 14px;
+  margin-bottom: 6px;
+  font-size: 14px;
+}
+
+.trigger-list-item button {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.qr-panel {
+  background-color: #f9fafb;
+  border: 1px solid #e1e0d9;
+  border-radius: 8px;
+  padding: 15px 20px;
+  margin: 15px 0;
+  text-align: center;
+}
+
+.qr-panel code {
+  background-color: #eaf2f8;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.alert-card {
+  border: 1px solid #e1e0d9;
+  border-radius: 8px;
+  padding: 12px 18px;
+  margin-bottom: 12px;
+}
+
+.alert-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.alert-card-header > div:last-child {
+  display: flex;
+  gap: 8px;
+}
+
+.alert-card-header button {
+  padding: 6px 12px;
+  font-size: 13px;
+}

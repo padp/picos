@@ -1,9 +1,12 @@
 import os
 from datetime import date, datetime, time, timedelta
 
+from bson import ObjectId
+from bson.errors import InvalidId
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
+import alerts
 import billet_monitor
 from billet_monitor import plant_now
 from db import ensure_indexes, get_db
@@ -88,9 +91,12 @@ if os.environ.get("SQL_PASS"):
     # alongside the real Render deployment - writes its own independent,
     # overlapping RUNNING/IDLE stream instead of being deduplicated,
     # double-counting real time. POLL_DISABLED lets a local/dev instance
-    # serve reads against production Mongo without also polling it.
+    # serve reads against production Mongo without also polling it - also
+    # keeps a local instance from firing real pushes to whatever ntfy
+    # topics real users have already subscribed to.
     if not os.environ.get("POLL_DISABLED"):
         billet_monitor.start_background_poller()
+        alerts.start_background_alert_poller()
 
 
 @app.get("/")
@@ -338,6 +344,77 @@ def cycle_breakdown():
         accounted_seconds=accounted_seconds,
         **totals,
     )
+
+
+def _serialize_rule(rule):
+    rule["_id"] = str(rule["_id"])
+    for trigger in rule.get("triggers", []):
+        trigger["description"] = alerts.describe_trigger(trigger)
+    return rule
+
+
+@app.get("/api/alerts/tags")
+def alerts_tags():
+    """Every press_data field a trigger can be built against (bool or
+    numeric only - see alerts.list_available_tags), for the trigger
+    builder's field dropdown."""
+    return jsonify(tags=alerts.list_available_tags(get_db()))
+
+
+@app.get("/api/alerts")
+def alerts_list():
+    db = get_db()
+    rules = list(db.alert_rules.find({}, sort=[("created_at", -1)]))
+    return jsonify(alerts=[_serialize_rule(r) for r in rules])
+
+
+@app.post("/api/alerts")
+def alerts_create():
+    """Creates a new alert - a fresh randomly-generated ntfy topic plus
+    the trigger set the request body describes. The frontend renders the
+    returned topic as a QR code (https://ntfy.sh/<topic>) right away so
+    the person creating it can subscribe their phone in one scan."""
+    payload = request.get_json(force=True, silent=True) or {}
+    doc, err = alerts.build_rule_doc(payload)
+    if err:
+        return jsonify(error=err), 400
+    db = get_db()
+    doc["topic"] = alerts.generate_topic(db)
+    result = db.alert_rules.insert_one(doc)
+    doc["_id"] = result.inserted_id
+    return jsonify(_serialize_rule(doc)), 201
+
+
+@app.patch("/api/alerts/<rule_id>")
+def alerts_update(rule_id):
+    """Only toggles active (enable/disable the whole topic without
+    deleting it) - editing triggers goes through delete + re-create,
+    since a topic's QR code/subscription doesn't change either way."""
+    payload = request.get_json(force=True, silent=True) or {}
+    if not isinstance(payload.get("active"), bool):
+        return jsonify(error="active must be true/false"), 400
+    db = get_db()
+    try:
+        oid = ObjectId(rule_id)
+    except InvalidId:
+        return jsonify(error="invalid id"), 400
+    result = db.alert_rules.update_one({"_id": oid}, {"$set": {"active": payload["active"]}})
+    if result.matched_count == 0:
+        return jsonify(error="not found"), 404
+    return jsonify(ok=True)
+
+
+@app.delete("/api/alerts/<rule_id>")
+def alerts_delete(rule_id):
+    db = get_db()
+    try:
+        oid = ObjectId(rule_id)
+    except InvalidId:
+        return jsonify(error="invalid id"), 400
+    result = db.alert_rules.delete_one({"_id": oid})
+    if result.deleted_count == 0:
+        return jsonify(error="not found"), 404
+    return jsonify(ok=True)
 
 
 @app.get("/health")
