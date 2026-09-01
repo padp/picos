@@ -153,6 +153,54 @@ function ConditionRow({ condition, tags, comparators, boolModes, onChange, onRem
   );
 }
 
+// A generic https://ntfy.sh/<topic> link only reliably opens the ntfy
+// app instead of a browser tab if the OS's App/Universal Links
+// association happens to be set up and honored by however it's opened
+// (confirmed live: unreliable on iOS depending on scan method) - nothing
+// on this side can force that. So alongside the QR, always offer the
+// two paths that work regardless: tap the link directly (useful when
+// viewing this page on the same phone), and copy the bare topic name to
+// paste into the app's own "Add Subscription" field.
+function CopyButton({ text }) {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (err) {
+      window.prompt('Copy this topic name:', text);
+      return;
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  return (
+    <button type="button" className="secondary-button" onClick={handleCopy}>
+      {copied ? 'Copied!' : 'Copy Topic'}
+    </button>
+  );
+}
+
+function SubscribeBlock({ topic, size }) {
+  const url = `https://ntfy.sh/${topic}`;
+  return (
+    <div className="qr-panel">
+      <QRCodeSVG value={url} size={size} />
+      <p className="stat-sub">
+        Scan in the ntfy app, or{' '}
+        <a href={url} target="_blank" rel="noreferrer">
+          tap here
+        </a>{' '}
+        if you're on the subscribing phone. If neither opens the app, paste the topic into the app's own
+        Add Subscription screen:
+      </p>
+      <div className="subscribe-actions">
+        <code>{topic}</code>
+        <CopyButton text={topic} />
+      </div>
+    </div>
+  );
+}
+
 function TriggerBuilder({ tags, comparators, boolModes, onAdd }) {
   const [draft, setDraft] = useState(emptyDraft());
 
@@ -406,18 +454,13 @@ function AlertsView({ onBackToDefault }) {
           )}
 
           {justCreated && (
-            <div className="qr-panel">
+            <>
               <h3>{justCreated.label || 'New alert created'}</h3>
-              <p className="stat-sub">
-                Scan this in the ntfy app to subscribe. Topic: <code>{justCreated.topic}</code>
-              </p>
-              <QRCodeSVG value={`https://ntfy.sh/${justCreated.topic}`} size={200} />
-              <div>
-                <button type="button" className="secondary-button" onClick={() => setJustCreated(null)}>
-                  Done
-                </button>
-              </div>
-            </div>
+              <SubscribeBlock topic={justCreated.topic} size={200} />
+              <button type="button" className="secondary-button" onClick={() => setJustCreated(null)}>
+                Done
+              </button>
+            </>
           )}
 
           <h3>Existing Alerts</h3>
@@ -455,11 +498,7 @@ function AlertsView({ onBackToDefault }) {
                     </li>
                   ))}
                 </ul>
-                {qrTopicShown === rule.topic && (
-                  <div className="qr-panel">
-                    <QRCodeSVG value={`https://ntfy.sh/${rule.topic}`} size={180} />
-                  </div>
-                )}
+                {qrTopicShown === rule.topic && <SubscribeBlock topic={rule.topic} size={180} />}
               </div>
             ))
           )}
