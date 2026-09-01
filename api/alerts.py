@@ -285,18 +285,30 @@ def build_rule_doc(payload):
 
 
 def send_teams(webhook_url, title, message, timeout=10):
-    """MessageCard payload - understood by both a classic Teams Incoming
-    Webhook connector and, as plain JSON, readable by a Workflows-app
-    webhook trigger (which needs its own flow configured to build a
-    card from these fields - Workflows triggers don't auto-render a
-    message the way classic connectors do)."""
+    """Adaptive Card payload, wrapped in the "attachments" array a
+    Workflows-app "Post an Adaptive Card" flow expects to loop over -
+    confirmed live against a real webhook: a classic MessageCard payload
+    (understood by the now-being-retired O365 Connector Incoming
+    Webhook) makes that kind of flow fail immediately, since its
+    for-each over attachments finds nothing to iterate.
+
+    One TextBlock per line rather than a single block with embedded
+    "\\n"s - Adaptive Cards treat a literal newline inside one
+    TextBlock's text as a space, not a line break."""
+    body = [{"type": "TextBlock", "text": title, "weight": "Bolder", "size": "Medium", "wrap": True}]
+    body.extend({"type": "TextBlock", "text": line, "wrap": True} for line in message.split("\n") if line)
     payload = {
-        "@type": "MessageCard",
-        "@context": "http://schema.org/extensions",
-        "summary": title,
-        "themeColor": "D03B3B",
-        "title": title,
-        "text": message.replace("\n", "\n\n"),
+        "attachments": [
+            {
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    "type": "AdaptiveCard",
+                    "version": "1.4",
+                    "body": body,
+                },
+            }
+        ]
     }
     req = urllib.request.Request(
         webhook_url,
