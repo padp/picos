@@ -39,4 +39,11 @@ def ensure_indexes():
     # query (recent same-profile-and-die rows, newest first).
     db.billet_cycles.create_index([("profile", 1), ("die_copy", 1), ("ts", -1)])
     db.state_events.create_index("ts_start")
-    db.alert_rules.create_index("topic", unique=True)
+    # Drop the old ntfy-era unique index on `topic` if it's still there -
+    # alert_rules no longer has a topic field (alerts.py moved to Teams
+    # webhook_url instead), and MongoDB's unique index treats a missing
+    # field as null, so a second webhook_url-only document would
+    # otherwise collide with the first on that phantom null value.
+    existing = {idx["name"] for idx in db.alert_rules.list_indexes()}
+    if "topic_1" in existing:
+        db.alert_rules.drop_index("topic_1")

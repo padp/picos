@@ -348,6 +348,11 @@ def cycle_breakdown():
 
 def _serialize_rule(rule):
     rule["_id"] = str(rule["_id"])
+    # webhook_url is a bearer secret (anyone holding it can post into a
+    # real Teams channel) and this app has no auth on any endpoint - the
+    # full value is written to Mongo (alerts.py needs it to actually
+    # send) but never handed back out through the API, masked or not.
+    rule["webhook_url_masked"] = alerts.mask_webhook_url(rule.pop("webhook_url", None))
     for trigger in rule.get("triggers", []):
         trigger["description"] = alerts.describe_trigger(trigger)
     return rule
@@ -375,18 +380,36 @@ def alerts_list():
     return jsonify(alerts=[_serialize_rule(r) for r in rules])
 
 
+@app.post("/api/alerts/test-webhook")
+def alerts_test_webhook():
+    """Sends one real message to a Teams webhook URL right away, before
+    it's saved as an alert - lets whoever's setting this up catch a
+    pasted-wrong URL immediately instead of waiting for a real trigger
+    condition to happen. Synchronous (unlike alerts._send_teams_async,
+    used by the live poller) since this is a one-off manual click, not
+    something on the hot path that must never block."""
+    payload = request.get_json(force=True, silent=True) or {}
+    webhook_url = payload.get("webhook_url")
+    err = alerts.validate_webhook_url(webhook_url)
+    if err:
+        return jsonify(error=err), 400
+    ok, status, body = alerts.send_teams(
+        webhook_url, "Paducah Press - Test Alert", "This is a test message from the Press Alerts page."
+    )
+    if not ok:
+        return jsonify(error=f"Teams rejected the request (status {status}): {body[:300]}"), 400
+    return jsonify(ok=True)
+
+
 @app.post("/api/alerts")
 def alerts_create():
-    """Creates a new alert - a fresh randomly-generated ntfy topic plus
-    the trigger set the request body describes. The frontend renders the
-    returned topic as a QR code (https://ntfy.sh/<topic>) right away so
-    the person creating it can subscribe their phone in one scan."""
+    """Creates a new alert against the Teams webhook URL and trigger set
+    the request body describes."""
     payload = request.get_json(force=True, silent=True) or {}
     doc, err = alerts.build_rule_doc(payload)
     if err:
         return jsonify(error=err), 400
     db = get_db()
-    doc["topic"] = alerts.generate_topic(db)
     result = db.alert_rules.insert_one(doc)
     doc["_id"] = result.inserted_id
     return jsonify(_serialize_rule(doc)), 201
@@ -394,9 +417,9 @@ def alerts_create():
 
 @app.patch("/api/alerts/<rule_id>")
 def alerts_update(rule_id):
-    """Only toggles active (enable/disable the whole topic without
-    deleting it) - editing triggers goes through delete + re-create,
-    since a topic's QR code/subscription doesn't change either way."""
+    """Only toggles active (enable/disable the whole rule without
+    deleting it) - editing triggers or the webhook URL goes through
+    delete + re-create instead."""
     payload = request.get_json(force=True, silent=True) or {}
     if not isinstance(payload.get("active"), bool):
         return jsonify(error="active must be true/false"), 400

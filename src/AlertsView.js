@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
-import { QRCodeSVG } from 'qrcode.react';
 import { PRESS_API_BASE, REQUEST_TIMEOUT } from './Constants';
 
 // One-click shortcuts for the three most common "something needs
@@ -153,54 +152,6 @@ function ConditionRow({ condition, tags, comparators, boolModes, onChange, onRem
   );
 }
 
-// A generic https://ntfy.sh/<topic> link only reliably opens the ntfy
-// app instead of a browser tab if the OS's App/Universal Links
-// association happens to be set up and honored by however it's opened
-// (confirmed live: unreliable on iOS depending on scan method) - nothing
-// on this side can force that. So alongside the QR, always offer the
-// two paths that work regardless: tap the link directly (useful when
-// viewing this page on the same phone), and copy the bare topic name to
-// paste into the app's own "Add Subscription" field.
-function CopyButton({ text }) {
-  const [copied, setCopied] = useState(false);
-  const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch (err) {
-      window.prompt('Copy this topic name:', text);
-      return;
-    }
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  };
-  return (
-    <button type="button" className="secondary-button" onClick={handleCopy}>
-      {copied ? 'Copied!' : 'Copy Topic'}
-    </button>
-  );
-}
-
-function SubscribeBlock({ topic, size }) {
-  const url = `https://ntfy.sh/${topic}`;
-  return (
-    <div className="qr-panel">
-      <QRCodeSVG value={url} size={size} />
-      <p className="stat-sub">
-        Scan in the ntfy app, or{' '}
-        <a href={url} target="_blank" rel="noreferrer">
-          tap here
-        </a>{' '}
-        if you're on the subscribing phone. If neither opens the app, paste the topic into the app's own
-        Add Subscription screen:
-      </p>
-      <div className="subscribe-actions">
-        <code>{topic}</code>
-        <CopyButton text={topic} />
-      </div>
-    </div>
-  );
-}
-
 function TriggerBuilder({ tags, comparators, boolModes, onAdd }) {
   const [draft, setDraft] = useState(emptyDraft());
 
@@ -289,6 +240,45 @@ function TriggerBuilder({ tags, comparators, boolModes, onAdd }) {
   );
 }
 
+function WebhookField({ webhookUrl, setWebhookUrl }) {
+  const [testState, setTestState] = useState(null); // null | 'sending' | 'ok' | 'error'
+  const [testError, setTestError] = useState('');
+
+  const handleTest = async () => {
+    setTestState('sending');
+    setTestError('');
+    try {
+      await axios.post(`${PRESS_API_BASE}/api/alerts/test-webhook`, { webhook_url: webhookUrl }, { timeout: REQUEST_TIMEOUT });
+      setTestState('ok');
+    } catch (err) {
+      setTestState('error');
+      setTestError((err.response && err.response.data && err.response.data.error) || 'Could not reach that URL.');
+    }
+  };
+
+  return (
+    <div className="trigger-form-row">
+      <label className="trigger-field-label">
+        Teams webhook URL
+        <input
+          type="text"
+          value={webhookUrl}
+          onChange={(e) => {
+            setWebhookUrl(e.target.value);
+            setTestState(null);
+          }}
+          placeholder="https://…webhook.office.com/webhookb2/…"
+        />
+      </label>
+      <button type="button" className="secondary-button" disabled={!webhookUrl || testState === 'sending'} onClick={handleTest}>
+        {testState === 'sending' ? 'Sending…' : 'Send Test'}
+      </button>
+      {testState === 'ok' && <span className="test-result test-ok">✓ Sent - check the Teams channel</span>}
+      {testState === 'error' && <span className="test-result test-error">✗ {testError}</span>}
+    </div>
+  );
+}
+
 function AlertsView({ onBackToDefault }) {
   const [tags, setTags] = useState([]);
   const [comparators, setComparators] = useState([]);
@@ -297,9 +287,8 @@ function AlertsView({ onBackToDefault }) {
   const [alertList, setAlertList] = useState([]);
   const [stagingTriggers, setStagingTriggers] = useState([]);
   const [label, setLabel] = useState('');
+  const [webhookUrl, setWebhookUrl] = useState('');
   const [repeat, setRepeat] = useState('recurring');
-  const [justCreated, setJustCreated] = useState(null);
-  const [qrTopicShown, setQrTopicShown] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -335,19 +324,19 @@ function AlertsView({ onBackToDefault }) {
   };
 
   const handleCreate = async () => {
-    if (stagingTriggers.length === 0) return;
+    if (stagingTriggers.length === 0 || !webhookUrl) return;
     setIsSubmitting(true);
     try {
       const triggers = stagingTriggers.map(({ _key, ...t }) => t);
       const res = await axios.post(
         `${PRESS_API_BASE}/api/alerts`,
-        { label: label || undefined, repeat, triggers },
+        { label: label || undefined, repeat, webhook_url: webhookUrl, triggers },
         { timeout: REQUEST_TIMEOUT }
       );
       setAlertList((list) => [res.data, ...list]);
-      setJustCreated(res.data);
       setStagingTriggers([]);
       setLabel('');
+      setWebhookUrl('');
       setRepeat('recurring');
     } catch (err) {
       window.alert((err.response && err.response.data && err.response.data.error) || 'Could not create alert.');
@@ -366,11 +355,10 @@ function AlertsView({ onBackToDefault }) {
   };
 
   const deleteRule = async (rule) => {
-    if (!window.confirm(`Delete "${rule.label || rule.topic}"? Anyone subscribed will stop getting these alerts.`)) return;
+    if (!window.confirm(`Delete "${rule.label || 'this alert'}"? Nothing will post to Teams for it anymore.`)) return;
     try {
       await axios.delete(`${PRESS_API_BASE}/api/alerts/${rule._id}`, { timeout: REQUEST_TIMEOUT });
       setAlertList((list) => list.filter((r) => r._id !== rule._id));
-      if (justCreated && justCreated._id === rule._id) setJustCreated(null);
     } catch (err) {
       window.alert('Could not delete alert.');
     }
@@ -387,10 +375,11 @@ function AlertsView({ onBackToDefault }) {
         </div>
       </div>
       <p className="stat-sub">
-        Build a set of conditions on any live press tag, then create an alert to get a topic you scan into
-        the ntfy app (free on the App Store / Play Store) - your phone gets a push notification the moment
-        any of its triggers trip. A recurring alert stays quiet until a trigger clears and trips again; a
-        one-time alert is removed automatically right after it fires once.
+        Build a set of conditions on any live press tag, then create an alert that posts to a Microsoft
+        Teams channel the moment any of its triggers trip. Paste in that channel's webhook URL (Teams:
+        channel &rarr; ⋯ &rarr; Connectors &rarr; Incoming Webhook, or the Workflows app's "Post to a channel
+        when a webhook request is received"). A recurring alert stays quiet until a trigger clears and trips
+        again; a one-time alert is removed automatically right after it fires once.
       </p>
 
       {isLoading ? (
@@ -423,6 +412,8 @@ function AlertsView({ onBackToDefault }) {
             </ul>
           )}
 
+          <WebhookField webhookUrl={webhookUrl} setWebhookUrl={setWebhookUrl} />
+
           <div className="trigger-form-row">
             <label className="trigger-field-label">
               Alert name (optional)
@@ -443,24 +434,21 @@ function AlertsView({ onBackToDefault }) {
                 ))}
               </select>
             </label>
-            <button type="button" onClick={handleCreate} disabled={stagingTriggers.length === 0 || isSubmitting}>
+            <button
+              type="button"
+              onClick={handleCreate}
+              disabled={stagingTriggers.length === 0 || !webhookUrl || isSubmitting}
+            >
               {isSubmitting ? 'Creating…' : 'Create Alert'}
             </button>
           </div>
-          {stagingTriggers.length === 0 && (
+          {(stagingTriggers.length === 0 || !webhookUrl) && (
             <p className="stat-sub">
-              Add at least one trigger above (a preset, or build one and click + Add Trigger) to enable this.
+              {stagingTriggers.length === 0
+                ? 'Add at least one trigger above (a preset, or build one and click + Add Trigger)'
+                : 'Enter a Teams webhook URL above'}{' '}
+              to enable this.
             </p>
-          )}
-
-          {justCreated && (
-            <>
-              <h3>{justCreated.label || 'New alert created'}</h3>
-              <SubscribeBlock topic={justCreated.topic} size={200} />
-              <button type="button" className="secondary-button" onClick={() => setJustCreated(null)}>
-                Done
-              </button>
-            </>
           )}
 
           <h3>Existing Alerts</h3>
@@ -471,17 +459,11 @@ function AlertsView({ onBackToDefault }) {
               <div key={rule._id} className="alert-card">
                 <div className="alert-card-header">
                   <div>
-                    <strong>{rule.label || 'Untitled alert'}</strong> <span className="stat-sub">({rule.topic})</span>
+                    <strong>{rule.label || 'Untitled alert'}</strong>{' '}
+                    <span className="stat-sub">(webhook {rule.webhook_url_masked})</span>
                     {rule.repeat === 'one_time' && <span className="stat-sub"> · one-time</span>}
                   </div>
                   <div>
-                    <button
-                      type="button"
-                      className="secondary-button"
-                      onClick={() => setQrTopicShown(qrTopicShown === rule.topic ? null : rule.topic)}
-                    >
-                      {qrTopicShown === rule.topic ? 'Hide QR' : 'Show QR'}
-                    </button>
                     <button type="button" className="secondary-button" onClick={() => toggleActive(rule)}>
                       {rule.active ? 'Disable' : 'Enable'}
                     </button>
@@ -490,7 +472,7 @@ function AlertsView({ onBackToDefault }) {
                     </button>
                   </div>
                 </div>
-                {!rule.active && <p className="stat-sub">Disabled — won't send notifications.</p>}
+                {!rule.active && <p className="stat-sub">Disabled — won't post to Teams.</p>}
                 <ul className="trigger-list">
                   {rule.triggers.map((t) => (
                     <li key={t.id} className="trigger-list-item">
@@ -498,7 +480,6 @@ function AlertsView({ onBackToDefault }) {
                     </li>
                   ))}
                 </ul>
-                {qrTopicShown === rule.topic && <SubscribeBlock topic={rule.topic} size={180} />}
               </div>
             ))
           )}

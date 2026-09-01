@@ -696,32 +696,18 @@ input[type="text"]:focus, input[type="number"]:focus {
   font-size: 12px;
 }
 
-.qr-panel {
-  background-color: #f9fafb;
-  border: 1px solid #e1e0d9;
-  border-radius: 8px;
-  padding: 15px 20px;
-  margin: 15px 0;
-  text-align: center;
+.test-result {
+  font-size: 14px;
+  font-weight: 600;
+  flex-basis: 100%;
 }
 
-.qr-panel code {
-  background-color: #eaf2f8;
-  padding: 2px 6px;
-  border-radius: 4px;
+.test-result.test-ok {
+  color: #1a8f4c;
 }
 
-.subscribe-actions {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  margin-top: 8px;
-}
-
-.subscribe-actions button {
-  padding: 6px 12px;
-  font-size: 13px;
+.test-result.test-error {
+  color: #d03b3b;
 }
 
 .alert-card {
