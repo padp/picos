@@ -370,6 +370,8 @@ def alerts_tags():
         comparators=alerts.comparator_options(),
         bool_modes=alerts.bool_mode_options(),
         repeat_modes=list(alerts.REPEAT_MODES),
+        has_default_webhook=bool(alerts.default_webhook_url()),
+        recipient_email_domain=alerts.ALLOWED_RECIPIENT_DOMAIN,
     )
 
 
@@ -393,7 +395,8 @@ def alerts_test_webhook():
     err = alerts.validate_webhook_url(webhook_url)
     if err:
         return jsonify(error=err), 400
-    recipient_email = payload.get("recipient_email") or None
+    webhook_url = webhook_url or alerts.default_webhook_url()
+    recipient_email = payload.get("recipient_email")
     err = alerts.validate_recipient_email(recipient_email)
     if err:
         return jsonify(error=err), 400

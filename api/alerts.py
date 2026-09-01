@@ -61,6 +61,7 @@ first time any of its triggers fires, per-request).
 """
 import json
 import operator as _op
+import os
 import re
 import secrets
 import threading
@@ -81,6 +82,11 @@ _COMPARATORS = {
     "==": _op.eq,
     "!=": _op.ne,
 }
+
+# This isn't a general-purpose emailer - every alert is meant for
+# someone in this org's own Teams tenant, so anything outside this
+# domain is almost certainly a typo, not a deliberate destination.
+ALLOWED_RECIPIENT_DOMAIN = "uwh.uacj-group.com"
 
 # Symbols alone assume everyone reads math notation fluently - spelling
 # each one out alongside it (see describe_condition) means they don't
@@ -231,27 +237,41 @@ def _build_condition(c):
     return condition
 
 
+def default_webhook_url():
+    """Most people reuse one shared Teams flow (routed by
+    recipient_email, see send_teams) for every alert - DEFAULT_TEAMS_
+    WEBHOOK_URL, a Render env var (same pattern as SQL_PASS: a live
+    secret, so it lives in the deploy environment, never in a source
+    file/git history), lets someone create alerts without pasting that
+    same URL in every single time. Still fully overridable per-alert -
+    see build_rule_doc."""
+    return os.environ.get("DEFAULT_TEAMS_WEBHOOK_URL") or None
+
+
 def validate_webhook_url(url):
     if not url or not isinstance(url, str):
-        return "a Teams webhook URL is required"
+        if default_webhook_url():
+            return None  # falls back to the configured default - see build_rule_doc
+        return "a Teams webhook URL is required (no default is configured)"
     if not url.startswith("https://"):
         return "the webhook URL must start with https://"
     return None
 
 
 def validate_recipient_email(email):
-    """Optional - only checked at all if someone actually provided a
-    value. Deliberately loose (just "looks like an email"): a strict
-    regex mostly just rejects valid-but-unusual addresses, and the real
-    validation that matters happens on Teams/Power Automate's side when
-    it tries to resolve the address to a person."""
-    if email is None or email == "":
-        return None
-    if not isinstance(email, str) or email.count("@") != 1:
-        return "recipient_email doesn't look like a valid email address"
+    """Required - every alert must specify who it's for. Restricted to
+    ALLOWED_RECIPIENT_DOMAIN specifically, not just "looks like an
+    email": anything else is almost certainly a mistyped address, not a
+    deliberate cross-org destination, and the real per-address
+    validation happens on Teams/Power Automate's side anyway when it
+    tries to resolve the address to a person."""
+    if not email or not isinstance(email, str) or email.count("@") != 1:
+        return "a recipient email is required"
     local, _, domain = email.partition("@")
-    if not local or "." not in domain:
+    if not local:
         return "recipient_email doesn't look like a valid email address"
+    if domain.lower() != ALLOWED_RECIPIENT_DOMAIN:
+        return f"recipient_email must end in @{ALLOWED_RECIPIENT_DOMAIN}"
     return None
 
 
@@ -265,8 +285,9 @@ def build_rule_doc(payload):
     err = validate_webhook_url(webhook_url)
     if err:
         return None, err
+    webhook_url = webhook_url or default_webhook_url()
 
-    recipient_email = payload.get("recipient_email") or None
+    recipient_email = payload.get("recipient_email")
     err = validate_recipient_email(recipient_email)
     if err:
         return None, err

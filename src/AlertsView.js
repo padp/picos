@@ -240,42 +240,40 @@ function TriggerBuilder({ tags, comparators, boolModes, onAdd }) {
   );
 }
 
-function WebhookField({ webhookUrl, setWebhookUrl, recipientEmail, setRecipientEmail }) {
+// No webhook URL input at all - every alert here goes through the one
+// shared Teams flow configured server-side (DEFAULT_TEAMS_WEBHOOK_URL,
+// a Render env var - see alerts.default_webhook_url), routed per-alert
+// by recipient_email instead. The backend still accepts a webhook_url
+// override on its own (build_rule_doc/test-webhook both take one), for
+// anyone who ever needs a different destination via a direct API call -
+// this UI just never sends one.
+function isValidRecipient(email, domain) {
+  if (!email || !domain) return false;
+  return email.toLowerCase().endsWith(`@${domain.toLowerCase()}`);
+}
+
+function RecipientField({ recipientEmail, setRecipientEmail, hasDefaultWebhook, recipientEmailDomain }) {
   const [testState, setTestState] = useState(null); // null | 'sending' | 'ok' | 'error'
   const [testError, setTestError] = useState('');
+  const isValid = isValidRecipient(recipientEmail, recipientEmailDomain);
 
   const handleTest = async () => {
+    if (!isValid) return;
     setTestState('sending');
     setTestError('');
     try {
-      await axios.post(
-        `${PRESS_API_BASE}/api/alerts/test-webhook`,
-        { webhook_url: webhookUrl, recipient_email: recipientEmail || undefined },
-        { timeout: REQUEST_TIMEOUT }
-      );
+      await axios.post(`${PRESS_API_BASE}/api/alerts/test-webhook`, { recipient_email: recipientEmail }, { timeout: REQUEST_TIMEOUT });
       setTestState('ok');
     } catch (err) {
       setTestState('error');
-      setTestError((err.response && err.response.data && err.response.data.error) || 'Could not reach that URL.');
+      setTestError((err.response && err.response.data && err.response.data.error) || 'Could not send.');
     }
   };
 
   return (
     <div className="trigger-form-row">
       <label className="trigger-field-label">
-        Teams webhook URL
-        <input
-          type="text"
-          value={webhookUrl}
-          onChange={(e) => {
-            setWebhookUrl(e.target.value);
-            setTestState(null);
-          }}
-          placeholder="https://…webhook.office.com/webhookb2/…"
-        />
-      </label>
-      <label className="trigger-field-label">
-        Recipient email (optional)
+        Recipient email
         <input
           type="text"
           value={recipientEmail}
@@ -283,10 +281,22 @@ function WebhookField({ webhookUrl, setWebhookUrl, recipientEmail, setRecipientE
             setRecipientEmail(e.target.value);
             setTestState(null);
           }}
-          placeholder="someone@company.com - only if this flow routes by recipient"
+          placeholder={recipientEmailDomain ? `someone@${recipientEmailDomain}` : 'someone@company.com'}
         />
       </label>
-      <button type="button" className="secondary-button" disabled={!webhookUrl || testState === 'sending'} onClick={handleTest}>
+      <button
+        type="button"
+        className="secondary-button"
+        disabled={!hasDefaultWebhook || !isValid || testState === 'sending'}
+        onClick={handleTest}
+        title={
+          !hasDefaultWebhook
+            ? 'No shared Teams flow is configured'
+            : !isValid && recipientEmailDomain
+              ? `Must end in @${recipientEmailDomain}`
+              : undefined
+        }
+      >
         {testState === 'sending' ? 'Sending…' : 'Send Test'}
       </button>
       {testState === 'ok' && <span className="test-result test-ok">✓ Sent - check the Teams channel</span>}
@@ -300,10 +310,11 @@ function AlertsView({ onBackToDefault }) {
   const [comparators, setComparators] = useState([]);
   const [boolModes, setBoolModes] = useState([]);
   const [repeatModes, setRepeatModes] = useState(['recurring', 'one_time']);
+  const [hasDefaultWebhook, setHasDefaultWebhook] = useState(false);
+  const [recipientEmailDomain, setRecipientEmailDomain] = useState('');
   const [alertList, setAlertList] = useState([]);
   const [stagingTriggers, setStagingTriggers] = useState([]);
   const [label, setLabel] = useState('');
-  const [webhookUrl, setWebhookUrl] = useState('');
   const [recipientEmail, setRecipientEmail] = useState('');
   const [repeat, setRepeat] = useState('recurring');
   const [isLoading, setIsLoading] = useState(true);
@@ -320,6 +331,8 @@ function AlertsView({ onBackToDefault }) {
       setComparators(tagsRes.data.comparators || []);
       setBoolModes(tagsRes.data.bool_modes || []);
       setRepeatModes(tagsRes.data.repeat_modes || ['recurring', 'one_time']);
+      setHasDefaultWebhook(!!tagsRes.data.has_default_webhook);
+      setRecipientEmailDomain(tagsRes.data.recipient_email_domain || '');
       setAlertList(alertsRes.data.alerts || []);
       setError(null);
     } catch (err) {
@@ -340,8 +353,10 @@ function AlertsView({ onBackToDefault }) {
     setStagingTriggers((list) => list.filter((t) => t._key !== key));
   };
 
+  const canCreate = stagingTriggers.length > 0 && hasDefaultWebhook && isValidRecipient(recipientEmail, recipientEmailDomain);
+
   const handleCreate = async () => {
-    if (stagingTriggers.length === 0 || !webhookUrl) return;
+    if (!canCreate) return;
     setIsSubmitting(true);
     try {
       const triggers = stagingTriggers.map(({ _key, ...t }) => t);
@@ -350,8 +365,7 @@ function AlertsView({ onBackToDefault }) {
         {
           label: label || undefined,
           repeat,
-          webhook_url: webhookUrl,
-          recipient_email: recipientEmail || undefined,
+          recipient_email: recipientEmail,
           triggers,
         },
         { timeout: REQUEST_TIMEOUT }
@@ -359,7 +373,6 @@ function AlertsView({ onBackToDefault }) {
       setAlertList((list) => [res.data, ...list]);
       setStagingTriggers([]);
       setLabel('');
-      setWebhookUrl('');
       setRecipientEmail('');
       setRepeat('recurring');
     } catch (err) {
@@ -399,11 +412,9 @@ function AlertsView({ onBackToDefault }) {
         </div>
       </div>
       <p className="stat-sub">
-        Build a set of conditions on any live press tag, then create an alert that posts to a Microsoft
-        Teams channel the moment any of its triggers trip. Paste in that channel's webhook URL (Teams:
-        channel &rarr; ⋯ &rarr; Connectors &rarr; Incoming Webhook, or the Workflows app's "Post to a channel
-        when a webhook request is received"). A recurring alert stays quiet until a trigger clears and trips
-        again; a one-time alert is removed automatically right after it fires once.
+        Build a set of conditions on any live press tag, then create an alert that messages a recipient on
+        Microsoft Teams the moment any of its triggers trip. A recurring alert stays quiet until a trigger
+        clears and trips again; a one-time alert is removed automatically right after it fires once.
       </p>
 
       {isLoading ? (
@@ -436,11 +447,11 @@ function AlertsView({ onBackToDefault }) {
             </ul>
           )}
 
-          <WebhookField
-            webhookUrl={webhookUrl}
-            setWebhookUrl={setWebhookUrl}
+          <RecipientField
             recipientEmail={recipientEmail}
             setRecipientEmail={setRecipientEmail}
+            hasDefaultWebhook={hasDefaultWebhook}
+            recipientEmailDomain={recipientEmailDomain}
           />
 
           <div className="trigger-form-row">
@@ -463,19 +474,17 @@ function AlertsView({ onBackToDefault }) {
                 ))}
               </select>
             </label>
-            <button
-              type="button"
-              onClick={handleCreate}
-              disabled={stagingTriggers.length === 0 || !webhookUrl || isSubmitting}
-            >
+            <button type="button" onClick={handleCreate} disabled={!canCreate || isSubmitting}>
               {isSubmitting ? 'Creating…' : 'Create Alert'}
             </button>
           </div>
-          {(stagingTriggers.length === 0 || !webhookUrl) && (
+          {!canCreate && (
             <p className="stat-sub">
               {stagingTriggers.length === 0
                 ? 'Add at least one trigger above (a preset, or build one and click + Add Trigger)'
-                : 'Enter a Teams webhook URL above'}{' '}
+                : !hasDefaultWebhook
+                  ? 'No shared Teams flow is configured (DEFAULT_TEAMS_WEBHOOK_URL)'
+                  : `Enter a recipient email ending in @${recipientEmailDomain}`}{' '}
               to enable this.
             </p>
           )}
@@ -488,9 +497,12 @@ function AlertsView({ onBackToDefault }) {
               <div key={rule._id} className="alert-card">
                 <div className="alert-card-header">
                   <div>
-                    <strong>{rule.label || 'Untitled alert'}</strong>{' '}
-                    <span className="stat-sub">(webhook {rule.webhook_url_masked})</span>
-                    {rule.recipient_email && <span className="stat-sub"> · to {rule.recipient_email}</span>}
+                    <strong>{rule.label || 'Untitled alert'}</strong>
+                    {rule.recipient_email ? (
+                      <span className="stat-sub"> · to {rule.recipient_email}</span>
+                    ) : (
+                      <span className="stat-sub"> · default recipient</span>
+                    )}
                     {rule.repeat === 'one_time' && <span className="stat-sub"> · one-time</span>}
                   </div>
                   <div>
