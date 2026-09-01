@@ -393,8 +393,15 @@ def alerts_test_webhook():
     err = alerts.validate_webhook_url(webhook_url)
     if err:
         return jsonify(error=err), 400
+    recipient_email = payload.get("recipient_email") or None
+    err = alerts.validate_recipient_email(recipient_email)
+    if err:
+        return jsonify(error=err), 400
     ok, status, body = alerts.send_teams(
-        webhook_url, "Paducah Press - Test Alert", "This is a test message from the Press Alerts page."
+        webhook_url,
+        "Paducah Press - Test Alert",
+        "This is a test message from the Press Alerts page.",
+        recipient_email=recipient_email,
     )
     if not ok:
         return jsonify(error=f"Teams rejected the request (status {status}): {body[:300]}"), 400

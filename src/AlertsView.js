@@ -240,7 +240,7 @@ function TriggerBuilder({ tags, comparators, boolModes, onAdd }) {
   );
 }
 
-function WebhookField({ webhookUrl, setWebhookUrl }) {
+function WebhookField({ webhookUrl, setWebhookUrl, recipientEmail, setRecipientEmail }) {
   const [testState, setTestState] = useState(null); // null | 'sending' | 'ok' | 'error'
   const [testError, setTestError] = useState('');
 
@@ -248,7 +248,11 @@ function WebhookField({ webhookUrl, setWebhookUrl }) {
     setTestState('sending');
     setTestError('');
     try {
-      await axios.post(`${PRESS_API_BASE}/api/alerts/test-webhook`, { webhook_url: webhookUrl }, { timeout: REQUEST_TIMEOUT });
+      await axios.post(
+        `${PRESS_API_BASE}/api/alerts/test-webhook`,
+        { webhook_url: webhookUrl, recipient_email: recipientEmail || undefined },
+        { timeout: REQUEST_TIMEOUT }
+      );
       setTestState('ok');
     } catch (err) {
       setTestState('error');
@@ -270,6 +274,18 @@ function WebhookField({ webhookUrl, setWebhookUrl }) {
           placeholder="https://…webhook.office.com/webhookb2/…"
         />
       </label>
+      <label className="trigger-field-label">
+        Recipient email (optional)
+        <input
+          type="text"
+          value={recipientEmail}
+          onChange={(e) => {
+            setRecipientEmail(e.target.value);
+            setTestState(null);
+          }}
+          placeholder="someone@company.com - only if this flow routes by recipient"
+        />
+      </label>
       <button type="button" className="secondary-button" disabled={!webhookUrl || testState === 'sending'} onClick={handleTest}>
         {testState === 'sending' ? 'Sending…' : 'Send Test'}
       </button>
@@ -288,6 +304,7 @@ function AlertsView({ onBackToDefault }) {
   const [stagingTriggers, setStagingTriggers] = useState([]);
   const [label, setLabel] = useState('');
   const [webhookUrl, setWebhookUrl] = useState('');
+  const [recipientEmail, setRecipientEmail] = useState('');
   const [repeat, setRepeat] = useState('recurring');
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -330,13 +347,20 @@ function AlertsView({ onBackToDefault }) {
       const triggers = stagingTriggers.map(({ _key, ...t }) => t);
       const res = await axios.post(
         `${PRESS_API_BASE}/api/alerts`,
-        { label: label || undefined, repeat, webhook_url: webhookUrl, triggers },
+        {
+          label: label || undefined,
+          repeat,
+          webhook_url: webhookUrl,
+          recipient_email: recipientEmail || undefined,
+          triggers,
+        },
         { timeout: REQUEST_TIMEOUT }
       );
       setAlertList((list) => [res.data, ...list]);
       setStagingTriggers([]);
       setLabel('');
       setWebhookUrl('');
+      setRecipientEmail('');
       setRepeat('recurring');
     } catch (err) {
       window.alert((err.response && err.response.data && err.response.data.error) || 'Could not create alert.');
@@ -412,7 +436,12 @@ function AlertsView({ onBackToDefault }) {
             </ul>
           )}
 
-          <WebhookField webhookUrl={webhookUrl} setWebhookUrl={setWebhookUrl} />
+          <WebhookField
+            webhookUrl={webhookUrl}
+            setWebhookUrl={setWebhookUrl}
+            recipientEmail={recipientEmail}
+            setRecipientEmail={setRecipientEmail}
+          />
 
           <div className="trigger-form-row">
             <label className="trigger-field-label">
@@ -461,6 +490,7 @@ function AlertsView({ onBackToDefault }) {
                   <div>
                     <strong>{rule.label || 'Untitled alert'}</strong>{' '}
                     <span className="stat-sub">(webhook {rule.webhook_url_masked})</span>
+                    {rule.recipient_email && <span className="stat-sub"> · to {rule.recipient_email}</span>}
                     {rule.repeat === 'one_time' && <span className="stat-sub"> · one-time</span>}
                   </div>
                   <div>

@@ -239,6 +239,22 @@ def validate_webhook_url(url):
     return None
 
 
+def validate_recipient_email(email):
+    """Optional - only checked at all if someone actually provided a
+    value. Deliberately loose (just "looks like an email"): a strict
+    regex mostly just rejects valid-but-unusual addresses, and the real
+    validation that matters happens on Teams/Power Automate's side when
+    it tries to resolve the address to a person."""
+    if email is None or email == "":
+        return None
+    if not isinstance(email, str) or email.count("@") != 1:
+        return "recipient_email doesn't look like a valid email address"
+    local, _, domain = email.partition("@")
+    if not local or "." not in domain:
+        return "recipient_email doesn't look like a valid email address"
+    return None
+
+
 def build_rule_doc(payload):
     """Validates payload (the POST /api/alerts body) and returns
     (doc, None) or (None, error_message)."""
@@ -247,6 +263,11 @@ def build_rule_doc(payload):
 
     webhook_url = payload.get("webhook_url")
     err = validate_webhook_url(webhook_url)
+    if err:
+        return None, err
+
+    recipient_email = payload.get("recipient_email") or None
+    err = validate_recipient_email(recipient_email)
     if err:
         return None, err
 
@@ -280,11 +301,12 @@ def build_rule_doc(payload):
         "repeat": repeat,
         "created_at": plant_now().isoformat(),
         "webhook_url": webhook_url,
+        "recipient_email": recipient_email,
         "triggers": triggers,
     }, None
 
 
-def send_teams(webhook_url, title, message, timeout=10):
+def send_teams(webhook_url, title, message, recipient_email=None, timeout=10):
     """Adaptive Card payload, wrapped in the "attachments" array a
     Workflows-app "Post an Adaptive Card" flow expects to loop over -
     confirmed live against a real webhook: a classic MessageCard payload
@@ -294,7 +316,14 @@ def send_teams(webhook_url, title, message, timeout=10):
 
     One TextBlock per line rather than a single block with embedded
     "\\n"s - Adaptive Cards treat a literal newline inside one
-    TextBlock's text as a space, not a line break."""
+    TextBlock's text as a space, not a line break.
+
+    recipient_email is a top-level sibling of "attachments", not part
+    of the card itself - lets ONE shared flow (its "Post card in a chat
+    or channel" action's Recipient field bound to
+    triggerBody()?['recipient_email']) serve every alert anyone creates,
+    routed per-request to whoever it's for, instead of needing a
+    separate flow built per person."""
     body = [{"type": "TextBlock", "text": title, "weight": "Bolder", "size": "Medium", "wrap": True}]
     body.extend({"type": "TextBlock", "text": line, "wrap": True} for line in message.split("\n") if line)
     payload = {
@@ -310,6 +339,8 @@ def send_teams(webhook_url, title, message, timeout=10):
             }
         ]
     }
+    if recipient_email:
+        payload["recipient_email"] = recipient_email
     req = urllib.request.Request(
         webhook_url,
         data=json.dumps(payload).encode("utf-8"),
@@ -326,11 +357,11 @@ def send_teams(webhook_url, title, message, timeout=10):
         return False, None, str(exc)
 
 
-def _send_teams_async(webhook_url, title, message):
+def _send_teams_async(webhook_url, title, message, recipient_email=None):
     # Fire-and-forget on its own thread - see module docstring on why
     # this loop must never block on the webhook endpoint's response time.
     def _run():
-        ok, status, body = send_teams(webhook_url, title, message)
+        ok, status, body = send_teams(webhook_url, title, message, recipient_email=recipient_email)
         if not ok:
             print(f"[alerts] Teams send failed ({status}): {body[:200]}")
 
@@ -421,7 +452,7 @@ class AlertEvaluator:
         if rule.get("repeat") == "one_time":
             message += "\n(one-time alert - this rule is now retired)"
         print(f"[alerts] firing rule {rule['_id']} / trigger {trigger['id']}: {desc} ({values})")
-        _send_teams_async(rule["webhook_url"], title, message)
+        _send_teams_async(rule["webhook_url"], title, message, recipient_email=rule.get("recipient_email"))
 
 
 def run_alert_loop():
