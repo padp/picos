@@ -1,13 +1,19 @@
 """User-configurable ntfy.sh alerts on raw press_data tags.
 
 Lets someone build a rule set (e.g. "Billet Temperature Actual (F) < 700
-for >= 60s") entirely from the live press_data document's own fields -
-no PLC-specific knowledge baked in here beyond bool-vs-numeric, so any
-tag GetSendPressDataToDB.py happens to be writing today is automatically
-selectable (see list_available_tags). Each rule set gets its own
-randomly-generated ntfy topic; the frontend renders that as a QR code
-(https://ntfy.sh/<topic>, the same URL ntfy's own app QR-scans to add a
-subscription) so a phone can subscribe to it in one scan.
+AND Extrusion Active is False, for >= 60s") entirely from the live
+press_data document's own fields. The ONLY press-specific piece in this
+whole module is list_available_tags() (and the frontend's PRESET_TRIGGERS
+shortcuts) - the trigger/condition schema, comparator set, compound-AND
+evaluation, and one-time/recurring mechanics below are all written in
+terms of generic "field: value" pairs, not press-specific behavior, so
+this same engine works for any document shape someone points
+list_available_tags() at.
+
+Each rule set gets its own randomly-generated ntfy topic; the frontend
+renders that as a QR code (https://ntfy.sh/<topic>, the same URL ntfy's
+own app QR-scans to add a subscription) so a phone can subscribe to it
+in one scan.
 
 Runs as its own background poller, independent of billet_monitor.py's
 Detector - same press_data document, same 2s cadence, but deliberately
@@ -15,6 +21,31 @@ NOT sharing that loop. A slow/unreachable ntfy.sh must never delay the
 billet-cycle/state_events tracking that loop is responsible for (and per
 that module's own POLL_DISABLED lesson, this one is skipped for a local
 dev instance the same way - see app.py).
+
+Trigger schema - one trigger is a compound (AND-only; multiple
+independent triggers on one rule already give OR from the user's
+perspective, since any one of them firing sends a push) list of
+conditions that must ALL hold, continuously, for sustained_s before it
+fires:
+    {
+        "id": "<hex>",
+        "conditions": [
+            {"field": str, "type": "bool", "equals": bool, "mode": "becomes"|"stays"},
+            {"field": str, "type": "numeric", "comparator": "<"|"<="|">"|">="|"=="|"!=", "threshold": number},
+            ...
+        ],
+        "sustained_s": number,
+        "active": bool,
+    }
+"mode" on a bool condition is display-only ("becomes True" vs "stays
+True" read differently but evaluate identically - see describe_condition)
+- purely so the wording someone picked while building it survives into
+what's actually shown later, without a second code path.
+
+A rule (one topic, its label/repeat setting, and its triggers) also
+carries "repeat": "recurring" (default - stays armed, re-fires each time
+a trigger re-trips after clearing) or "one_time" (deleted entirely the
+first time any of its triggers fires, per-request - "one_time" alert.
 """
 import operator as _op
 import re
@@ -29,6 +60,8 @@ from db import get_db
 
 TOPIC_PREFIX = "pad-whitehall-"
 
+REPEAT_MODES = ("recurring", "one_time")
+
 _COMPARATORS = {
     "<": _op.lt,
     "<=": _op.le,
@@ -37,6 +70,34 @@ _COMPARATORS = {
     "==": _op.eq,
     "!=": _op.ne,
 }
+
+# Symbols alone assume everyone reads math notation fluently - spelling
+# each one out alongside it (see describe_condition) means they don't
+# have to.
+COMPARATOR_PHRASES = {
+    "<": "less than",
+    "<=": "less than or equal to",
+    ">": "greater than",
+    ">=": "greater than or equal to",
+    "==": "equal to",
+    "!=": "not equal to",
+}
+
+BOOL_MODES = ("becomes", "stays")
+
+
+def comparator_options():
+    """[{"value": "<", "label": "less than"}, ...] in a sensible display
+    order - for the frontend's condition dropdown, so the symbol/phrase
+    pairing is defined once, here, rather than duplicated client-side."""
+    return [{"value": symbol, "label": phrase} for symbol, phrase in COMPARATOR_PHRASES.items()]
+
+
+def bool_mode_options():
+    return [
+        {"value": "becomes", "label": "becomes"},
+        {"value": "stays", "label": "stays"},
+    ]
 
 
 def generate_topic(db):
@@ -48,11 +109,12 @@ def generate_topic(db):
 
 def list_available_tags(db):
     """Every press_data field that's a plain bool or number, since those
-    are the only two kinds of threshold the trigger builder understands.
+    are the only two kinds of condition the trigger builder understands.
     Read from the latest live document rather than a hardcoded field
     list, so it stays correct if GetSendPressDataToDB.py's own tag list
     ever changes - the same reason billet_monitor.py polls press_data
-    instead of the PLC directly."""
+    instead of the PLC directly. This is the one press-specific function
+    in this module - see the module docstring."""
     doc = db.press_data.find_one({}, sort=[(FLD_DATETIME, -1)])
     if not doc:
         return []
@@ -83,12 +145,18 @@ def _format_duration(seconds):
     return f"{minutes}m{sec}s" if sec else f"{minutes}m"
 
 
+def describe_condition(condition):
+    pretty = _pretty_field(condition["field"])
+    if condition["type"] == "bool":
+        word = "stays" if condition.get("mode") == "stays" else "becomes"
+        return f"{pretty} {word} {'True' if condition.get('equals', True) else 'False'}"
+    comparator = condition.get("comparator")
+    phrase = COMPARATOR_PHRASES.get(comparator, comparator)
+    return f"{pretty} {comparator} {condition.get('threshold')} ({phrase})"
+
+
 def describe_trigger(trigger):
-    pretty = _pretty_field(trigger["field"])
-    if trigger["type"] == "bool":
-        core = f"{pretty} is {'True' if trigger.get('equals', True) else 'False'}"
-    else:
-        core = f"{pretty} {trigger.get('comparator')} {trigger.get('threshold')}"
+    core = " AND ".join(describe_condition(c) for c in trigger.get("conditions", []))
     sustained_s = trigger.get("sustained_s") or 0
     if sustained_s > 0:
         # Plain ASCII, not "≥" - Windows' default console codepage
@@ -98,28 +166,54 @@ def describe_trigger(trigger):
     return core
 
 
+def validate_condition(condition):
+    if not isinstance(condition, dict):
+        return "each condition must be an object"
+    field = condition.get("field")
+    if not field or not isinstance(field, str):
+        return "each condition needs a field"
+    ctype = condition.get("type")
+    if ctype not in ("bool", "numeric"):
+        return "type must be 'bool' or 'numeric'"
+    if ctype == "bool":
+        if not isinstance(condition.get("equals"), bool):
+            return "a bool condition needs equals: true/false"
+        if condition.get("mode") is not None and condition.get("mode") not in BOOL_MODES:
+            return f"mode must be one of {BOOL_MODES}"
+    else:
+        if condition.get("comparator") not in _COMPARATORS:
+            return f"comparator must be one of {sorted(_COMPARATORS)}"
+        threshold = condition.get("threshold")
+        if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
+            return "a numeric condition needs a numeric threshold"
+    return None
+
+
 def validate_trigger(trigger):
     if not isinstance(trigger, dict):
         return "each trigger must be an object"
-    field = trigger.get("field")
-    if not field or not isinstance(field, str):
-        return "each trigger needs a field"
-    ttype = trigger.get("type")
-    if ttype not in ("bool", "numeric"):
-        return "type must be 'bool' or 'numeric'"
+    conditions = trigger.get("conditions")
+    if not isinstance(conditions, list) or not conditions:
+        return "each trigger needs at least one condition"
+    for condition in conditions:
+        err = validate_condition(condition)
+        if err:
+            return err
     sustained_s = trigger.get("sustained_s", 0)
     if isinstance(sustained_s, bool) or not isinstance(sustained_s, (int, float)) or sustained_s < 0:
         return "sustained_s must be a non-negative number"
-    if ttype == "bool":
-        if not isinstance(trigger.get("equals"), bool):
-            return "a bool trigger needs equals: true/false"
-    else:
-        if trigger.get("comparator") not in _COMPARATORS:
-            return f"comparator must be one of {sorted(_COMPARATORS)}"
-        threshold = trigger.get("threshold")
-        if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
-            return "a numeric trigger needs a numeric threshold"
     return None
+
+
+def _build_condition(c):
+    condition = {"field": c["field"], "type": c["type"]}
+    if c["type"] == "bool":
+        condition["equals"] = c["equals"]
+        condition["mode"] = c.get("mode") if c.get("mode") in BOOL_MODES else "becomes"
+    else:
+        condition["comparator"] = c["comparator"]
+        condition["threshold"] = c["threshold"]
+    return condition
 
 
 def build_rule_doc(payload):
@@ -137,27 +231,25 @@ def build_rule_doc(payload):
         err = validate_trigger(t)
         if err:
             return None, err
-        trigger = {
+        triggers.append({
             "id": secrets.token_hex(4),
-            "field": t["field"],
-            "type": t["type"],
+            "conditions": [_build_condition(c) for c in t["conditions"]],
             "sustained_s": t.get("sustained_s", 0),
             "active": True,
-        }
-        if t["type"] == "bool":
-            trigger["equals"] = t["equals"]
-        else:
-            trigger["comparator"] = t["comparator"]
-            trigger["threshold"] = t["threshold"]
-        triggers.append(trigger)
+        })
 
     label = payload.get("label")
     if label is not None and not isinstance(label, str):
         return None, "label must be a string"
 
+    repeat = payload.get("repeat", "recurring")
+    if repeat not in REPEAT_MODES:
+        return None, f"repeat must be one of {REPEAT_MODES}"
+
     return {
         "label": (label.strip() or None) if label else None,
         "active": True,
+        "repeat": repeat,
         "created_at": plant_now().isoformat(),
         "triggers": triggers,
     }, None
@@ -183,31 +275,37 @@ def _send_ntfy_async(topic, title, message, tags=None):
 
 
 class AlertEvaluator:
-    """Edge-triggered: a rule fires once when its condition has been
-    continuously true for >= sustained_s, then stays quiet (no repeat
-    pushes while the condition keeps holding) until it clears and trips
-    again - nobody wants a notification every 2 seconds for as long as,
-    say, Manual mode stays active."""
+    """Edge-triggered: a trigger fires once when ALL of its conditions
+    have been continuously true together for >= sustained_s, then stays
+    quiet (no repeat pushes while they keep holding) until they clear
+    and trip again - nobody wants a notification every 2 seconds for as
+    long as, say, Manual mode stays active. A "one_time" rule is deleted
+    outright the moment any one of its triggers fires this way, instead
+    of just re-arming."""
 
     def __init__(self, db):
         self._db = db
         # (topic, trigger_id) -> {"since": datetime|None, "fired": bool}
         self._trigger_state = {}
 
-    def _condition_met(self, trigger, doc):
-        value = doc.get(trigger["field"])
+    def _single_condition_met(self, condition, doc):
+        value = doc.get(condition["field"])
         if value is None:
             return False
-        if trigger["type"] == "bool":
-            return bool(value) == bool(trigger.get("equals", True))
+        if condition["type"] == "bool":
+            return bool(value) == bool(condition.get("equals", True))
         try:
             value = float(value)
         except (TypeError, ValueError):
             return False
-        cmp = _COMPARATORS.get(trigger.get("comparator"))
+        cmp = _COMPARATORS.get(condition.get("comparator"))
         if cmp is None:
             return False
-        return cmp(value, float(trigger.get("threshold", 0)))
+        return cmp(value, float(condition.get("threshold", 0)))
+
+    def _condition_met(self, trigger, doc):
+        conditions = trigger.get("conditions") or []
+        return bool(conditions) and all(self._single_condition_met(c, doc) for c in conditions)
 
     def evaluate(self, doc):
         if not doc:
@@ -218,7 +316,10 @@ class AlertEvaluator:
         live_keys = set()
         for rule in rules:
             topic = rule["topic"]
+            rule_consumed = False
             for trigger in rule.get("triggers", []):
+                if rule_consumed:
+                    break
                 if not trigger.get("active", True):
                     continue
                 key = (topic, trigger["id"])
@@ -237,18 +338,24 @@ class AlertEvaluator:
                 if held_s >= sustained_s and not state["fired"]:
                     state["fired"] = True
                     self._fire(rule, trigger, doc)
+                    if rule.get("repeat") == "one_time":
+                        self._db.alert_rules.delete_one({"_id": rule["_id"]})
+                        rule_consumed = True
 
-        # Forget any trigger that's since been deleted/edited away, so a
-        # long-running process doesn't leak memory across rule edits.
+        # Forget any trigger that's since been deleted/edited away (or
+        # whose rule just got consumed above), so a long-running process
+        # doesn't leak memory across rule edits.
         for key in set(self._trigger_state) - live_keys:
             del self._trigger_state[key]
 
     def _fire(self, rule, trigger, doc):
         desc = describe_trigger(trigger)
-        value = doc.get(trigger["field"])
+        values = ", ".join(f"{c['field']}={doc.get(c['field'])}" for c in trigger.get("conditions", []))
         title = rule.get("label") or "Paducah Press Alert"
-        message = f"{desc}\ncurrent value: {value}"
-        print(f"[alerts] firing {rule['topic']} / {trigger['id']}: {desc} (value={value})")
+        message = f"{desc}\n{values}"
+        if rule.get("repeat") == "one_time":
+            message += "\n(one-time alert - this topic is now retired)"
+        print(f"[alerts] firing {rule['topic']} / {trigger['id']}: {desc} ({values})")
         _send_ntfy_async(rule["topic"], title, message, tags=["warning"])
 
 

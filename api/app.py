@@ -355,10 +355,17 @@ def _serialize_rule(rule):
 
 @app.get("/api/alerts/tags")
 def alerts_tags():
-    """Every press_data field a trigger can be built against (bool or
-    numeric only - see alerts.list_available_tags), for the trigger
-    builder's field dropdown."""
-    return jsonify(tags=alerts.list_available_tags(get_db()))
+    """Everything the trigger builder needs that isn't user-entered:
+    every press_data field it can be built against (bool or numeric
+    only - see alerts.list_available_tags) plus the comparator/bool-mode
+    wording and repeat-mode options, defined once in alerts.py rather
+    than duplicated in the frontend."""
+    return jsonify(
+        tags=alerts.list_available_tags(get_db()),
+        comparators=alerts.comparator_options(),
+        bool_modes=alerts.bool_mode_options(),
+        repeat_modes=list(alerts.REPEAT_MODES),
+    )
 
 
 @app.get("/api/alerts")

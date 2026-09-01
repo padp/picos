@@ -4,14 +4,33 @@ import { QRCodeSVG } from 'qrcode.react';
 import { PRESS_API_BASE, REQUEST_TIMEOUT } from './Constants';
 
 // One-click shortcuts for the three most common "something needs
-// attention" conditions - each is just a pre-filled bool trigger on a
-// known tag, so they're nothing the generic builder below couldn't
-// already express by hand.
+// attention" conditions - each is just a pre-filled single-condition
+// bool trigger on a known tag, so they're nothing the generic builder
+// below couldn't already express by hand. The rest of this file (and
+// everything in api/alerts.py) has no press-specific knowledge at all -
+// this list, and the tags the API returns, are the only variable.
 const PRESET_TRIGGERS = [
-  { key: 'emergency', label: '+ Emergency Stop', trigger: { field: 'Emergency Mode Active (Bool)', type: 'bool', equals: true, sustained_s: 0 } },
-  { key: 'manual', label: '+ Manual Mode', trigger: { field: 'Manual Mode Active (Bool)', type: 'bool', equals: true, sustained_s: 0 } },
-  { key: 'setup', label: '+ Setup Mode', trigger: { field: 'Set-Up Mode Active (Bool)', type: 'bool', equals: true, sustained_s: 0 } },
+  {
+    key: 'emergency',
+    label: '+ Emergency Stop',
+    trigger: { conditions: [{ field: 'Emergency Mode Active (Bool)', type: 'bool', equals: true, mode: 'becomes' }], sustained_s: 0 },
+  },
+  {
+    key: 'manual',
+    label: '+ Manual Mode',
+    trigger: { conditions: [{ field: 'Manual Mode Active (Bool)', type: 'bool', equals: true, mode: 'becomes' }], sustained_s: 0 },
+  },
+  {
+    key: 'setup',
+    label: '+ Setup Mode',
+    trigger: { conditions: [{ field: 'Set-Up Mode Active (Bool)', type: 'bool', equals: true, mode: 'becomes' }], sustained_s: 0 },
+  },
 ];
+
+const REPEAT_LABELS = {
+  recurring: 'Recurring',
+  one_time: 'One-time (removed after it fires)',
+};
 
 function prettyField(field) {
   return field.replace(/\s*\([^)]*\)\s*$/, '').trim();
@@ -25,131 +44,212 @@ function formatDurationShort(seconds) {
   return s ? `${m}m${s}s` : `${m}m`;
 }
 
-// Preview-only mirror of alerts.describe_trigger on the backend - what's
-// actually stored (and shown once an alert exists) always comes from
-// that server-side copy, this just previews a trigger before it's
-// created, while it only exists as local staging-list state.
-function describeDraft(t) {
-  const pretty = prettyField(t.field);
-  const core = t.type === 'bool' ? `${pretty} is ${t.equals ? 'True' : 'False'}` : `${pretty} ${t.comparator} ${t.threshold}`;
+// Preview-only mirror of alerts.describe_condition/describe_trigger on
+// the backend - what's actually stored (and shown once an alert exists)
+// always comes from that server-side copy, this just previews a
+// trigger before it's created, while it's only local staging state.
+function describeCondition(c, comparators) {
+  const pretty = prettyField(c.field);
+  if (c.type === 'bool') {
+    const word = c.mode === 'stays' ? 'stays' : 'becomes';
+    return `${pretty} ${word} ${c.equals ? 'True' : 'False'}`;
+  }
+  const match = comparators.find((cc) => cc.value === c.comparator);
+  const phrase = match ? match.label : c.comparator;
+  return `${pretty} ${c.comparator} ${c.threshold} (${phrase})`;
+}
+
+function describeDraft(t, comparators) {
+  const core = t.conditions.map((c) => describeCondition(c, comparators)).join(' AND ');
   const sustainedS = t.sustained_s || 0;
   return sustainedS > 0 ? `${core} for >=${formatDurationShort(sustainedS)}` : core;
 }
 
-function emptyDraft() {
-  return { field: '', comparator: '<', threshold: '', equals: true, durationValue: '', durationUnit: 1 };
+function emptyCondition() {
+  return { field: '', type: '', comparator: '', threshold: '', equals: true, mode: 'becomes' };
 }
 
-function TriggerBuilder({ tags, onAdd }) {
-  const [draft, setDraft] = useState(emptyDraft());
-  const matchedTag = tags.find((t) => t.field === draft.field);
-  const update = (patch) => setDraft((d) => ({ ...d, ...patch }));
+function emptyDraft() {
+  return { conditions: [emptyCondition()], durationValue: '', durationUnit: 1 };
+}
 
-  const canAdd = !!matchedTag && (matchedTag.type === 'bool' || (draft.threshold !== '' && !Number.isNaN(Number(draft.threshold))));
+function ConditionRow({ condition, tags, comparators, boolModes, onChange, onRemove, showRemove }) {
+  const matchedTag = tags.find((t) => t.field === condition.field);
+  const update = (patch) => onChange({ ...condition, ...patch });
+
+  const handleFieldChange = (field) => {
+    const tag = tags.find((t) => t.field === field);
+    if (!tag) {
+      onChange(emptyCondition());
+      return;
+    }
+    if (tag.type === 'bool') {
+      onChange({ field, type: 'bool', equals: true, mode: 'becomes' });
+    } else {
+      onChange({ field, type: 'numeric', comparator: (comparators[0] || {}).value || '<', threshold: '' });
+    }
+  };
+
+  return (
+    <div className="condition-row">
+      <select value={condition.field} onChange={(e) => handleFieldChange(e.target.value)}>
+        <option value="">Choose a tag…</option>
+        <optgroup label="Boolean tags">
+          {tags.filter((t) => t.type === 'bool').map((t) => (
+            <option key={t.field} value={t.field}>
+              {t.field}
+            </option>
+          ))}
+        </optgroup>
+        <optgroup label="Numeric tags">
+          {tags.filter((t) => t.type === 'numeric').map((t) => (
+            <option key={t.field} value={t.field}>
+              {t.field}
+            </option>
+          ))}
+        </optgroup>
+      </select>
+
+      {matchedTag && matchedTag.type === 'bool' && (
+        <>
+          <select value={condition.mode || 'becomes'} onChange={(e) => update({ mode: e.target.value })}>
+            {boolModes.map((m) => (
+              <option key={m.value} value={m.value}>
+                {m.label}
+              </option>
+            ))}
+          </select>
+          <select value={condition.equals ? '1' : '0'} onChange={(e) => update({ equals: e.target.value === '1' })}>
+            <option value="1">True</option>
+            <option value="0">False</option>
+          </select>
+        </>
+      )}
+
+      {matchedTag && matchedTag.type === 'numeric' && (
+        <>
+          <select value={condition.comparator} onChange={(e) => update({ comparator: e.target.value })}>
+            {comparators.map((c) => (
+              <option key={c.value} value={c.value}>
+                {c.value} ({c.label})
+              </option>
+            ))}
+          </select>
+          <input
+            type="number"
+            value={condition.threshold}
+            onChange={(e) => update({ threshold: e.target.value })}
+            placeholder="value"
+          />
+        </>
+      )}
+
+      {showRemove && (
+        <button type="button" className="secondary-button condition-remove" onClick={onRemove} title="Remove this condition">
+          &times;
+        </button>
+      )}
+    </div>
+  );
+}
+
+function TriggerBuilder({ tags, comparators, boolModes, onAdd }) {
+  const [draft, setDraft] = useState(emptyDraft());
+
+  const updateCondition = (index, next) => {
+    setDraft((d) => ({ ...d, conditions: d.conditions.map((c, i) => (i === index ? next : c)) }));
+  };
+  const addCondition = () => {
+    setDraft((d) => ({ ...d, conditions: [...d.conditions, emptyCondition()] }));
+  };
+  const removeCondition = (index) => {
+    setDraft((d) => ({ ...d, conditions: d.conditions.filter((_, i) => i !== index) }));
+  };
+
+  const isComplete = (c) => {
+    if (!c.field) return false;
+    if (c.type === 'bool') return true;
+    if (c.type === 'numeric') return c.threshold !== '' && !Number.isNaN(Number(c.threshold));
+    return false;
+  };
+  const canAdd = draft.conditions.length > 0 && draft.conditions.every(isComplete);
 
   const handleAdd = () => {
     if (!canAdd) return;
     const sustained_s = draft.durationValue === '' ? 0 : Math.max(0, Number(draft.durationValue) * draft.durationUnit);
-    const trigger = matchedTag.type === 'bool'
-      ? { field: draft.field, type: 'bool', equals: draft.equals, sustained_s }
-      : { field: draft.field, type: 'numeric', comparator: draft.comparator, threshold: Number(draft.threshold), sustained_s };
-    onAdd(trigger);
+    const conditions = draft.conditions.map((c) =>
+      c.type === 'bool'
+        ? { field: c.field, type: 'bool', equals: c.equals, mode: c.mode || 'becomes' }
+        : { field: c.field, type: 'numeric', comparator: c.comparator, threshold: Number(c.threshold) }
+    );
+    onAdd({ conditions, sustained_s });
     setDraft(emptyDraft());
   };
 
   return (
     <div className="trigger-builder">
+      {draft.conditions.map((condition, index) => (
+        <div key={index} className="condition-row-wrap">
+          {index > 0 && <span className="and-label">AND</span>}
+          <ConditionRow
+            condition={condition}
+            tags={tags}
+            comparators={comparators}
+            boolModes={boolModes}
+            onChange={(next) => updateCondition(index, next)}
+            onRemove={() => removeCondition(index)}
+            showRemove={draft.conditions.length > 1}
+          />
+          {index === draft.conditions.length - 1 && (
+            <button
+              type="button"
+              className="secondary-button add-condition-button"
+              onClick={addCondition}
+              title="Add another AND condition (compound alert)"
+            >
+              +
+            </button>
+          )}
+        </div>
+      ))}
+
       <div className="trigger-form-row">
-        <label className="trigger-field-label">
-          Tag
-          {/* A real <select> rather than input+datalist - a free-text
-              field needs its typed value to exactly match a tag string
-              before Add Trigger enables, with no visible sign of why it
-              hasn't (a trailing space or an unclicked suggestion is
-              enough). A select can only ever hold one of the listed
-              values (or none), so that whole failure mode can't happen. */}
-          <select value={draft.field} onChange={(e) => update({ field: e.target.value })}>
-            <option value="">Choose a tag…</option>
-            <optgroup label="Boolean tags">
-              {tags.filter((t) => t.type === 'bool').map((t) => (
-                <option key={t.field} value={t.field}>
-                  {t.field}
-                </option>
-              ))}
-            </optgroup>
-            <optgroup label="Numeric tags">
-              {tags.filter((t) => t.type === 'numeric').map((t) => (
-                <option key={t.field} value={t.field}>
-                  {t.field}
-                </option>
-              ))}
-            </optgroup>
-          </select>
-        </label>
-
-        {matchedTag && matchedTag.type === 'bool' && (
-          <label>
-            Alert when it
-            <select value={draft.equals ? '1' : '0'} onChange={(e) => update({ equals: e.target.value === '1' })}>
-              <option value="1">becomes True</option>
-              <option value="0">becomes False</option>
+        <label>
+          Hold for at least
+          <span className="duration-input">
+            <input
+              type="number"
+              min="0"
+              value={draft.durationValue}
+              onChange={(e) => setDraft((d) => ({ ...d, durationValue: e.target.value }))}
+              placeholder="0"
+            />
+            <select
+              value={draft.durationUnit}
+              onChange={(e) => setDraft((d) => ({ ...d, durationUnit: Number(e.target.value) }))}
+            >
+              <option value={1}>sec</option>
+              <option value={60}>min</option>
             </select>
-          </label>
-        )}
-
-        {matchedTag && matchedTag.type === 'numeric' && (
-          <>
-            <label>
-              Condition
-              <select value={draft.comparator} onChange={(e) => update({ comparator: e.target.value })}>
-                <option value="<">&lt;</option>
-                <option value="<=">&le;</option>
-                <option value=">">&gt;</option>
-                <option value=">=">&ge;</option>
-                <option value="==">=</option>
-                <option value="!=">&ne;</option>
-              </select>
-            </label>
-            <label>
-              Threshold
-              <input type="number" value={draft.threshold} onChange={(e) => update({ threshold: e.target.value })} />
-            </label>
-          </>
-        )}
-
-        {matchedTag && (
-          <label>
-            Hold for at least
-            <span className="duration-input">
-              <input
-                type="number"
-                min="0"
-                value={draft.durationValue}
-                onChange={(e) => update({ durationValue: e.target.value })}
-                placeholder="0"
-              />
-              <select value={draft.durationUnit} onChange={(e) => update({ durationUnit: Number(e.target.value) })}>
-                <option value={1}>sec</option>
-                <option value={60}>min</option>
-              </select>
-            </span>
-          </label>
-        )}
-
+          </span>
+        </label>
         <button type="button" className="secondary-button" disabled={!canAdd} onClick={handleAdd}>
           + Add Trigger
         </button>
       </div>
-      {draft.field && !matchedTag && <p className="stat-sub">Pick a tag from the list to configure its condition.</p>}
     </div>
   );
 }
 
 function AlertsView({ onBackToDefault }) {
   const [tags, setTags] = useState([]);
+  const [comparators, setComparators] = useState([]);
+  const [boolModes, setBoolModes] = useState([]);
+  const [repeatModes, setRepeatModes] = useState(['recurring', 'one_time']);
   const [alertList, setAlertList] = useState([]);
   const [stagingTriggers, setStagingTriggers] = useState([]);
   const [label, setLabel] = useState('');
+  const [repeat, setRepeat] = useState('recurring');
   const [justCreated, setJustCreated] = useState(null);
   const [qrTopicShown, setQrTopicShown] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -163,6 +263,9 @@ function AlertsView({ onBackToDefault }) {
         axios.get(`${PRESS_API_BASE}/api/alerts`, { timeout: REQUEST_TIMEOUT }),
       ]);
       setTags(tagsRes.data.tags || []);
+      setComparators(tagsRes.data.comparators || []);
+      setBoolModes(tagsRes.data.bool_modes || []);
+      setRepeatModes(tagsRes.data.repeat_modes || ['recurring', 'one_time']);
       setAlertList(alertsRes.data.alerts || []);
       setError(null);
     } catch (err) {
@@ -190,13 +293,14 @@ function AlertsView({ onBackToDefault }) {
       const triggers = stagingTriggers.map(({ _key, ...t }) => t);
       const res = await axios.post(
         `${PRESS_API_BASE}/api/alerts`,
-        { label: label || undefined, triggers },
+        { label: label || undefined, repeat, triggers },
         { timeout: REQUEST_TIMEOUT }
       );
       setAlertList((list) => [res.data, ...list]);
       setJustCreated(res.data);
       setStagingTriggers([]);
       setLabel('');
+      setRepeat('recurring');
     } catch (err) {
       window.alert((err.response && err.response.data && err.response.data.error) || 'Could not create alert.');
     } finally {
@@ -237,8 +341,8 @@ function AlertsView({ onBackToDefault }) {
       <p className="stat-sub">
         Build a set of conditions on any live press tag, then create an alert to get a topic you scan into
         the ntfy app (free on the App Store / Play Store) - your phone gets a push notification the moment
-        any of its conditions trip. Once a condition trips you won't be paged again for it until it clears
-        and trips again.
+        any of its triggers trip. A recurring alert stays quiet until a trigger clears and trips again; a
+        one-time alert is removed automatically right after it fires once.
       </p>
 
       {isLoading ? (
@@ -256,13 +360,13 @@ function AlertsView({ onBackToDefault }) {
             ))}
           </div>
 
-          <TriggerBuilder tags={tags} onAdd={addTrigger} />
+          <TriggerBuilder tags={tags} comparators={comparators} boolModes={boolModes} onAdd={addTrigger} />
 
           {stagingTriggers.length > 0 && (
             <ul className="trigger-list">
               {stagingTriggers.map((t) => (
                 <li key={t._key} className="trigger-list-item">
-                  <span>{describeDraft(t)}</span>
+                  <span>{describeDraft(t, comparators)}</span>
                   <button type="button" className="secondary-button" onClick={() => removeStaging(t._key)}>
                     Remove
                   </button>
@@ -281,12 +385,24 @@ function AlertsView({ onBackToDefault }) {
                 placeholder="e.g. Night shift watch"
               />
             </label>
+            <label>
+              Repeat
+              <select value={repeat} onChange={(e) => setRepeat(e.target.value)}>
+                {repeatModes.map((m) => (
+                  <option key={m} value={m}>
+                    {REPEAT_LABELS[m] || m}
+                  </option>
+                ))}
+              </select>
+            </label>
             <button type="button" onClick={handleCreate} disabled={stagingTriggers.length === 0 || isSubmitting}>
               {isSubmitting ? 'Creating…' : 'Create Alert'}
             </button>
           </div>
           {stagingTriggers.length === 0 && (
-            <p className="stat-sub">Add at least one trigger above (a preset, or build one and click + Add Trigger) to enable this.</p>
+            <p className="stat-sub">
+              Add at least one trigger above (a preset, or build one and click + Add Trigger) to enable this.
+            </p>
           )}
 
           {justCreated && (
@@ -313,6 +429,7 @@ function AlertsView({ onBackToDefault }) {
                 <div className="alert-card-header">
                   <div>
                     <strong>{rule.label || 'Untitled alert'}</strong> <span className="stat-sub">({rule.topic})</span>
+                    {rule.repeat === 'one_time' && <span className="stat-sub"> · one-time</span>}
                   </div>
                   <div>
                     <button
