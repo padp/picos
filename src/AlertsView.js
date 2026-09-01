@@ -62,17 +62,29 @@ function TriggerBuilder({ tags, onAdd }) {
       <div className="trigger-form-row">
         <label className="trigger-field-label">
           Tag
-          <input
-            list="alert-tag-options"
-            value={draft.field}
-            onChange={(e) => update({ field: e.target.value })}
-            placeholder="Start typing a tag name…"
-          />
-          <datalist id="alert-tag-options">
-            {tags.map((t) => (
-              <option key={t.field} value={t.field} />
-            ))}
-          </datalist>
+          {/* A real <select> rather than input+datalist - a free-text
+              field needs its typed value to exactly match a tag string
+              before Add Trigger enables, with no visible sign of why it
+              hasn't (a trailing space or an unclicked suggestion is
+              enough). A select can only ever hold one of the listed
+              values (or none), so that whole failure mode can't happen. */}
+          <select value={draft.field} onChange={(e) => update({ field: e.target.value })}>
+            <option value="">Choose a tag…</option>
+            <optgroup label="Boolean tags">
+              {tags.filter((t) => t.type === 'bool').map((t) => (
+                <option key={t.field} value={t.field}>
+                  {t.field}
+                </option>
+              ))}
+            </optgroup>
+            <optgroup label="Numeric tags">
+              {tags.filter((t) => t.type === 'numeric').map((t) => (
+                <option key={t.field} value={t.field}>
+                  {t.field}
+                </option>
+              ))}
+            </optgroup>
+          </select>
         </label>
 
         {matchedTag && matchedTag.type === 'bool' && (
@@ -273,6 +285,9 @@ function AlertsView({ onBackToDefault }) {
               {isSubmitting ? 'Creating…' : 'Create Alert'}
             </button>
           </div>
+          {stagingTriggers.length === 0 && (
+            <p className="stat-sub">Add at least one trigger above (a preset, or build one and click + Add Trigger) to enable this.</p>
+          )}
 
           {justCreated && (
             <div className="qr-panel">
