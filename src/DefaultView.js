@@ -5,7 +5,7 @@ function getPressStatus(data) {
   if (data['Extrusion Active (Bool)']) return { label: 'Running', color: '#2ecc71' };
   if (data['Die Change Active (Bool)']) return { label: 'Die Change', color: '#f39c12' };
   if (data['Set-Up Mode Active (Bool)']) return { label: 'Setup', color: '#f39c12' };
-  if (data['Manual Mode Active (Bool)']) return { label: 'Manual', color: '#3498db' };
+  if (data['Manual Mode Active (Bool)']) return { label: 'Manual', color: 'var(--color-accent)' };
   if (data['Automatic Mode Active (Bool)']) return { label: 'Automatic (Idle)', color: '#95a5a6' };
   return { label: 'Idle', color: '#95a5a6' };
 }

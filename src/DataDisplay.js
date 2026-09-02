@@ -43,7 +43,7 @@ function WelcomeDialog({ closeDialog }) {
         Your browser does not support the video tag.
       </video>
       <button onClick={closeDialog} style={{
-        padding: '10px', backgroundColor: '#3498db', color: '#fff', border: 'none', borderRadius: '5px'
+        padding: '10px', backgroundColor: 'var(--color-accent)', color: '#fff', border: 'none', borderRadius: '5px'
       }}>
         Skip
       </button>
