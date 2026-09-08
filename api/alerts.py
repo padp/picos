@@ -44,11 +44,23 @@ fires:
         "conditions": [
             {"field": str, "type": "bool", "equals": bool, "mode": "becomes"|"stays"},
             {"field": str, "type": "numeric", "comparator": "<"|"<="|">"|">="|"=="|"!=", "threshold": number},
+            {"field": str, "type": "string", "equals": str},
             ...
         ],
         "sustained_s": number,
         "active": bool,
     }
+The "string" type (exact match only) was added after this module was
+ported into granco_monitor's own api/alerts.py, where a "state" tag
+(RUNNING/IDLE/UNKNOWN) needed it - a string tag isn't currently exposed
+here by list_available_tags() (press_data doesn't have a comparable
+field written as a live scalar string today - "Profile" is the known
+case someone will want this for, but it's still written as an array,
+not a scalar, so it won't surface as a tag until whatever writes
+press_data resolves it to one; that's a separate, not-yet-investigated
+change), but the condition type itself is added here too so this stays
+the one shared engine, not two that have quietly drifted apart.
+
 "mode" on a bool condition is display-only ("becomes True" vs "stays
 True" read differently but evaluate identically - see describe_condition)
 - purely so the wording someone picked while building it survives into
@@ -129,13 +141,13 @@ def mask_webhook_url(url):
 
 
 def list_available_tags(db):
-    """Every press_data field that's a plain bool or number, since those
-    are the only two kinds of condition the trigger builder understands.
-    Read from the latest live document rather than a hardcoded field
-    list, so it stays correct if GetSendPressDataToDB.py's own tag list
-    ever changes - the same reason billet_monitor.py polls press_data
-    instead of the PLC directly. This is the one press-specific function
-    in this module - see the module docstring."""
+    """Every press_data field that's a plain bool, number, or string,
+    since those are the only three kinds of condition the trigger
+    builder understands. Read from the latest live document rather than
+    a hardcoded field list, so it stays correct if GetSendPressDataToDB.py's
+    own tag list ever changes - the same reason billet_monitor.py polls
+    press_data instead of the PLC directly. This is the one press-specific
+    function in this module - see the module docstring."""
     doc = db.press_data.find_one({}, sort=[(FLD_DATETIME, -1)])
     if not doc:
         return []
@@ -147,6 +159,8 @@ def list_available_tags(db):
             tags.append({"field": key, "type": "bool"})
         elif isinstance(value, (int, float)):
             tags.append({"field": key, "type": "numeric"})
+        elif isinstance(value, str):
+            tags.append({"field": key, "type": "string"})
     tags.sort(key=lambda t: t["field"])
     return tags
 
@@ -171,6 +185,8 @@ def describe_condition(condition):
     if condition["type"] == "bool":
         word = "stays" if condition.get("mode") == "stays" else "becomes"
         return f"{pretty} {word} {'True' if condition.get('equals', True) else 'False'}"
+    if condition["type"] == "string":
+        return f'{pretty} is "{condition.get("equals")}"'
     comparator = condition.get("comparator")
     phrase = COMPARATOR_PHRASES.get(comparator, comparator)
     return f"{pretty} {comparator} {condition.get('threshold')} ({phrase})"
@@ -194,13 +210,17 @@ def validate_condition(condition):
     if not field or not isinstance(field, str):
         return "each condition needs a field"
     ctype = condition.get("type")
-    if ctype not in ("bool", "numeric"):
-        return "type must be 'bool' or 'numeric'"
+    if ctype not in ("bool", "numeric", "string"):
+        return "type must be 'bool', 'numeric', or 'string'"
     if ctype == "bool":
         if not isinstance(condition.get("equals"), bool):
             return "a bool condition needs equals: true/false"
         if condition.get("mode") is not None and condition.get("mode") not in BOOL_MODES:
             return f"mode must be one of {BOOL_MODES}"
+    elif ctype == "string":
+        equals = condition.get("equals")
+        if not isinstance(equals, str) or not equals:
+            return "a string condition needs a non-empty equals value"
     else:
         if condition.get("comparator") not in _COMPARATORS:
             return f"comparator must be one of {sorted(_COMPARATORS)}"
@@ -231,10 +251,31 @@ def _build_condition(c):
     if c["type"] == "bool":
         condition["equals"] = c["equals"]
         condition["mode"] = c.get("mode") if c.get("mode") in BOOL_MODES else "becomes"
+    elif c["type"] == "string":
+        condition["equals"] = c["equals"]
     else:
         condition["comparator"] = c["comparator"]
         condition["threshold"] = c["threshold"]
     return condition
+
+
+def describe_draft_trigger(trigger):
+    """Validates a not-yet-created trigger and returns its human-readable
+    description (see describe_trigger), without persisting anything.
+    Ported from granco_monitor's api/alerts.py, where this was added as
+    a public entry point (rather than reaching into _build_condition
+    directly from app.py) for a natural-language alert-setup tool to show
+    someone the exact confirmation wording this API would give a normal
+    trigger, before they've committed to creating it. Returns
+    (description, None) or (None, error_message)."""
+    err = validate_trigger(trigger)
+    if err:
+        return None, err
+    built = {
+        "conditions": [_build_condition(c) for c in trigger["conditions"]],
+        "sustained_s": trigger.get("sustained_s", 0),
+    }
+    return describe_trigger(built), None
 
 
 def default_webhook_url():
@@ -409,6 +450,8 @@ class AlertEvaluator:
             return False
         if condition["type"] == "bool":
             return bool(value) == bool(condition.get("equals", True))
+        if condition["type"] == "string":
+            return str(value) == condition.get("equals")
         try:
             value = float(value)
         except (TypeError, ValueError):

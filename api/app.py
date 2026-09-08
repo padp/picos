@@ -382,6 +382,21 @@ def alerts_list():
     return jsonify(alerts=[_serialize_rule(r) for r in rules])
 
 
+@app.post("/api/alerts/describe")
+def alerts_describe():
+    """Read-only preview: validates a draft trigger (not yet created,
+    and never persisted here) and returns its human-readable description
+    via alerts.describe_draft_trigger. Ported from granco_monitor's
+    equivalent route - exists for a future natural-language alert-setup
+    tool to show someone exactly what it's about to create, using this
+    API's own authoritative wording, before they confirm."""
+    payload = request.get_json(force=True, silent=True) or {}
+    description, err = alerts.describe_draft_trigger(payload.get("trigger"))
+    if err:
+        return jsonify(error=err), 400
+    return jsonify(description=description)
+
+
 @app.post("/api/alerts/test-webhook")
 def alerts_test_webhook():
     """Sends one real message to a Teams webhook URL right away, before
