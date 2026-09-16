@@ -51,6 +51,7 @@ import threading
 import time
 from datetime import datetime
 
+from billet_monitor import plant_now
 from db import get_db
 
 POLL_INTERVAL_S = 2.0
@@ -68,6 +69,11 @@ FLD_CUT_NUMBER = "Coldsaw Current Cut Number"
 FLD_CUTS_TOTAL = "Number of Coldsaw Cuts"
 
 MAX_KEPT_BATCHES = 40
+# press_data's Date/Time is plant-local wall clock, and this runs on Render in
+# UTC - comparing it against datetime.now() reports everything as ~5 hours
+# stale, permanently. plant_now() is billet_monitor's fix for the identical bug
+# in the stall banner; reuse it rather than repeat the mistake.
+STALE_AFTER_S = 300
 # A completed extrusion below this fraction of the recent median peak is a
 # mid-billet counter reset (a burp early in the stroke leaves a ~45 ft fragment
 # in front of a real ~164 ft profile), not a profile. Measured 09/16.
@@ -318,7 +324,7 @@ def current_state():
     stale = None
     try:
         ts = datetime.strptime(live.get("ts"), "%m/%d/%Y %H:%M:%S")
-        stale = (datetime.now() - ts).total_seconds() > 300
+        stale = (plant_now() - ts).total_seconds() > STALE_AFTER_S
     except (TypeError, ValueError):
         pass
 
