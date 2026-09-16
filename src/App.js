@@ -4,6 +4,7 @@ import DefaultView from './DefaultView';
 import PressUptimeView from './PressUptimeView';
 import OperatorMonitorView from './OperatorMonitorView';
 import AlertsView from './AlertsView';
+import ColdsawGroupView from './ColdsawGroupView';
 import usePressData from './usePressData';
 import { DEFAULT_PAUSE_TIME } from './Constants';
 
@@ -28,12 +29,14 @@ const loadFromLocalStorage = (key, defaultValue) => {
 const HASH_ROUTES = {
   '#/monitor': 'uptime',
   '#/operator-monitor': 'operator',
+  '#/coldsaw-group': 'coldsaw',
 };
 const HASH_MODES = new Set(Object.values(HASH_ROUTES));
 const TITLES = {
   uptime: 'Press Monitor',
   operator: 'Press Operator Monitor',
   alerts: 'Press Alerts',
+  coldsaw: 'Coldsaw Group',
 };
 
 function App() {
@@ -90,6 +93,8 @@ function App() {
         />
       ) : mode === 'operator' ? (
         <OperatorMonitorView onBackToDefault={leaveRoute} />
+      ) : mode === 'coldsaw' ? (
+        <ColdsawGroupView onBackToDefault={leaveRoute} />
       ) : mode === 'alerts' ? (
         <AlertsView onBackToDefault={() => setMode('default')} />
       ) : (

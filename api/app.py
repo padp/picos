@@ -8,6 +8,7 @@ from flask_cors import CORS
 
 import alerts
 import billet_monitor
+import coldsaw
 from billet_monitor import plant_now
 from db import ensure_indexes, get_db
 
@@ -97,6 +98,7 @@ if os.environ.get("SQL_PASS"):
     if not os.environ.get("POLL_DISABLED"):
         billet_monitor.start_background_poller()
         alerts.start_background_alert_poller()
+        coldsaw.start_background_poller()
 
 
 @app.get("/")
@@ -356,6 +358,18 @@ def _serialize_rule(rule):
     for trigger in rule.get("triggers", []):
         trigger["description"] = alerts.describe_trigger(trigger)
     return rule
+
+
+@app.get("/api/coldsaw/current")
+def coldsaw_current():
+    """Live batch composition for the coldsaw group view.
+
+    Returns the batch currently forming, the last few released ones, and the
+    live saw/table state. Ordering note: members are stored in ARRIVAL order
+    (first in = lowest billet number). Material travels left to right, so the
+    view renders them reversed - first in ends up rightmost.
+    """
+    return jsonify(coldsaw.current_state())
 
 
 @app.get("/api/alerts/tags")
