@@ -69,8 +69,19 @@ FLD_DIE_COPY = "Die Copy"
 FLD_JOB = "Job Number (#)"
 FLD_CUT_NUMBER = "Coldsaw Current Cut Number"
 FLD_CUTS_TOTAL = "Number of Coldsaw Cuts"
+FLD_HOTSAW_ROT = "Hotsaw Blade Rotation Active (Bool)"
+FLD_CUT_LENGTH = "Coldsaw Current Cut Length Setpoint (in)"
+FLD_EXTRUDING = "Extrusion Active (Bool)"
 
 MAX_KEPT_BATCHES = 40
+
+# Billet 0 is the idle/no-billet-loaded placeholder, never a real billet, so a
+# profile is never attributed to it - it is recorded as unknown instead.
+NO_BILLET = 0
+
+# How many billets to keep when deducing profiles-per-billet. Long enough to
+# ride out a stoppage, short enough to follow a recipe change.
+PPB_HISTORY = 12
 # press_data's Date/Time is plant-local wall clock, and this runs on Render in
 # UTC - comparing it against datetime.now() reports everything as ~5 hours
 # stale, permanently. plant_now() is billet_monitor's fix for the identical bug
@@ -80,7 +91,7 @@ STALE_AFTER_S = 300
 # Bump to discard queue/batch state written by an older, buggy build rather
 # than carrying its corruption forward. v2 clears the state left by the
 # unlocked multi-worker version.
-STATE_VERSION = 4
+STATE_VERSION = 6
 
 # app.py starts the pollers at IMPORT time, which under gunicorn happens once
 # per worker - so every worker ran its own coldsaw poller against the same
@@ -116,6 +127,27 @@ def table_occupancy(doc):
         if length:
             out.append({"position": pos, "length_ft": length})
     return out
+
+
+def _profiles_per_billet(history):
+    """Deduce whether the running recipe yields 1 or 2 profiles per billet.
+
+    Measured directly: how many profiles arrive on the table between billet
+    changes. Verified against two known recipes - 979 gave {2: 13} and 1051
+    gave {1: 34}, with no ambiguity.
+
+    Hotsaw Blade Rotation Active corroborates this (2 rising edges per billet
+    vs 1) and is kept alongside as a cross-check. Hotsaw Blade Slide Active
+    does NOT work for it - it fires 2 to 5 times per billet on both recipes.
+
+    The mode is used rather than the mean: a stoppage or a partial billet at a
+    window edge produces a stray 0 or 5 that would drag an average off the
+    real, integral answer.
+    """
+    counts = [c for c in history if c > 0]
+    if not counts:
+        return None
+    return max(set(counts), key=counts.count)
 
 
 def _align(current, tracked):
@@ -192,6 +224,10 @@ class BatchTracker:
         self._last_billet = state.get("last_billet")
         self._completed_billet = state.get("completed_billet")
         self._seeded = state.get("seeded", False)
+        self._entries_this_billet = state.get("entries_this_billet", 0)
+        self._ppb_history = state.get("ppb_history", [])
+        self._hotsaw_this_billet = state.get("hotsaw_this_billet", 0)
+        self._last_hotsaw = state.get("last_hotsaw")
         self._seq = self._resume_seq()
 
     def _resume_seq(self):
@@ -205,7 +241,14 @@ class BatchTracker:
                       "last_actual": self._last_actual,
                       "last_billet": self._last_billet,
                       "completed_billet": self._completed_billet,
-                      "seeded": self._seeded, "updated_at": datetime.utcnow()}},
+                      "profiles_per_billet": _profiles_per_billet(self._ppb_history),
+                      "hotsaw_edges_this_billet": self._hotsaw_this_billet,
+                      "seeded": self._seeded,
+                      "entries_this_billet": self._entries_this_billet,
+                      "ppb_history": self._ppb_history[-PPB_HISTORY:],
+                      "hotsaw_this_billet": self._hotsaw_this_billet,
+                      "last_hotsaw": self._last_hotsaw,
+                      "updated_at": datetime.utcnow()}},
             upsert=True)
 
     def _forming(self):
@@ -283,8 +326,24 @@ class BatchTracker:
         billet = _num(doc.get(FLD_BILLET))
         if billet is not None:
             if self._last_billet is not None and billet != self._last_billet:
-                self._completed_billet = self._last_billet
+                # Billet 0 is the idle placeholder and never a real billet, so
+                # it is never recorded as one - profiles spanning it stay
+                # unknown rather than being labelled with a billet that does
+                # not exist.
+                self._completed_billet = (
+                    self._last_billet if self._last_billet != NO_BILLET else None)
+                if self._entries_this_billet:
+                    self._ppb_history.append(self._entries_this_billet)
+                    self._ppb_history = self._ppb_history[-PPB_HISTORY:]
+                self._entries_this_billet = 0
+                self._hotsaw_this_billet = 0
             self._last_billet = billet
+
+        rot = doc.get(FLD_HOTSAW_ROT)
+        if isinstance(rot, bool):
+            if self._last_hotsaw is False and rot is True:
+                self._hotsaw_this_billet += 1
+            self._last_hotsaw = rot
 
         occupancy = table_occupancy(doc)
         current = [round(e["length_ft"], 3) for e in occupancy]
@@ -305,9 +364,15 @@ class BatchTracker:
                     self._stretched(self._on_table.pop(), doc, setpoint)
             # Insertions arrive at the front (Table 1), newest first.
             for v in reversed(current[:added]):
+                self._entries_this_billet += 1
+                known = self._completed_billet not in (None, NO_BILLET)
                 self._on_table.insert(0, {
-                    "billet_number": self._completed_billet,
-                    "unknown": self._completed_billet is None,
+                    "billet_number": self._completed_billet if known else None,
+                    "unknown": not known,
+                    # Which profile of its billet this is. On a 2-profiles-per
+                    # -billet recipe two parts in a batch share a billet
+                    # number, and this is what tells them apart on the view.
+                    "billet_seq": self._entries_this_billet,
                     "profile": doc.get(FLD_PROFILE),
                     "die_copy": doc.get(FLD_DIE_COPY),
                     "job": doc.get(FLD_JOB),
@@ -322,10 +387,26 @@ class BatchTracker:
                       "cuts_total": _num(doc.get(FLD_CUTS_TOTAL)),
                       "billet_at_press": billet,
                       "completed_billet": self._completed_billet,
+                      "profiles_per_billet": _profiles_per_billet(self._ppb_history),
+                      "hotsaw_edges_this_billet": self._hotsaw_this_billet,
                       "queue_depth": len(self._on_table),
                       "queue_unknown": sum(1 for v in self._on_table
                                            if v.get("unknown")),
-                      "table": occupancy, "updated_at": datetime.utcnow()}},
+                      "table": occupancy,
+                      # The tracked sequence, newest first, carrying identity -
+                      # so the pre-stretch queue can be labelled instead of
+                      # showing bare lengths.
+                      "on_table": [
+                          {"billet_number": p.get("billet_number"),
+                           "billet_seq": p.get("billet_seq"),
+                           "unknown": p.get("unknown"),
+                           "profile": p.get("profile"),
+                           "length_ft": p.get("length_ft"),
+                           "entered_at": p.get("entered_at")}
+                          for p in self._on_table],
+                      "cut_length_in": _num(doc.get(FLD_CUT_LENGTH)),
+                      "extruding": bool(doc.get(FLD_EXTRUDING)),
+                      "updated_at": datetime.utcnow()}},
             upsert=True)
 
         prev = self._last_actual
