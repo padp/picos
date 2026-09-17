@@ -47,9 +47,12 @@ this is verified rather than assumed; a batch containing more than one profile
 is flagged mixed_profile, which should never appear and means something upstream
 is wrong if it does. A profile change also force-closes the open batch.
 """
+import os
+import socket
 import threading
 import time
-from datetime import datetime
+import uuid
+from datetime import datetime, timedelta
 
 from billet_monitor import plant_now
 from db import get_db
@@ -64,7 +67,6 @@ FLD_BILLET_DIE = "Billet Number (per Die)"
 FLD_PROFILE = "Profile"
 FLD_DIE_COPY = "Die Copy"
 FLD_JOB = "Job Number (#)"
-FLD_LENGTH = "Current Extrusion Length (ft)"
 FLD_CUT_NUMBER = "Coldsaw Current Cut Number"
 FLD_CUTS_TOTAL = "Number of Coldsaw Cuts"
 
@@ -74,24 +76,32 @@ MAX_KEPT_BATCHES = 40
 # stale, permanently. plant_now() is billet_monitor's fix for the identical bug
 # in the stall banner; reuse it rather than repeat the mistake.
 STALE_AFTER_S = 300
-# A completed extrusion below this fraction of the recent median peak is a
-# mid-billet counter reset (a burp early in the stroke leaves a ~45 ft fragment
-# in front of a real ~164 ft profile), not a profile. Measured 09/16.
-MIN_PEAK_FRACTION = 0.5
-PEAK_HISTORY = 25
+
+# Bump to discard queue/batch state written by an older, buggy build rather
+# than carrying its corruption forward. v2 clears the state left by the
+# unlocked multi-worker version.
+STATE_VERSION = 4
+
+# app.py starts the pollers at IMPORT time, which under gunicorn happens once
+# per worker - so every worker ran its own coldsaw poller against the same
+# Mongo state. billet_monitor survives that because it upserts on billet_key;
+# this tracker APPENDS, so N workers pushed each extrusion N times and popped
+# N members per increment. Live production showed exactly 2x duplication
+# ([41, 41, 42, 42, 43, 43]) with the queue growing one deep per billet, while
+# replaying the same press data through a single tracker reproduced ground
+# truth exactly - which is what localised it here rather than in the logic.
+#
+# So exactly one process may mutate state. The rest idle and stand by, ready
+# to take over if the holder dies.
+LOCK_ID = "coldsaw_poller"
+LOCK_TTL_S = 30
+OWNER = "{}:{}:{}".format(socket.gethostname(), os.getpid(), uuid.uuid4().hex[:8])
 
 
 def _num(value):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return value
-
-
-def _median(values):
-    if not values:
-        return None
-    ordered = sorted(values)
-    return ordered[len(ordered) // 2]
 
 
 def table_occupancy(doc):
@@ -108,21 +118,79 @@ def table_occupancy(doc):
     return out
 
 
-class BatchTracker:
-    """Owns the press->stretcher FIFO and the open batch.
+def _align(current, tracked):
+    """How many profiles entered the front and left the back since last poll.
 
-    State lives in Mongo (coldsaw_state) so a restart resumes rather than
-    silently re-seeding an empty queue and mis-attributing every later profile.
+    The table only ever inserts at position 1 and removes from the highest
+    occupied position, so the tracked sequence must survive as a contiguous
+    run inside the new one. Returns (added, removed) for the cheapest
+    explanation; falling back to a full replacement if none fits (a gap in the
+    data, say), which costs identities but never mis-assigns them.
+    """
+    for total in range(0, len(current) + len(tracked) + 1):
+        for added in range(0, min(total, len(current)) + 1):
+            removed = total - added
+            if removed > len(tracked):
+                continue
+            kept = tracked[:len(tracked) - removed] if removed else tracked
+            if current[added:] == kept:
+                return added, removed
+    return len(current), len(tracked)
+
+
+class BatchTracker:
+    """Tracks profiles through the run-out table, which is a SHIFT REGISTER.
+
+    A new profile appears at Profiles on Table 1 and pushes the others to
+    higher positions; the oldest leaves from the highest occupied position when
+    it is stretched. Identity therefore comes from POSITION IN THE SEQUENCE,
+    not from the length value.
+
+    Keying on the length alone is tempting - it is how a human follows a
+    profile down the table - but two profiles carry the same 3-dp length
+    simultaneously in 15.3% of samples (measured 09/17, up to three at once),
+    and collapsing those silently drops profiles from the batch.
+
+    So each poll aligns the current occupancy against the tracked sequence,
+    allowing only what the mechanism can do: insertions at the front, removals
+    from the back. The length values are still carried for display and for
+    cross-checking by hand.
+
+    Earlier versions inferred profiles from Current Extrusion Length resets and
+    popped a positional FIFO. That was wrong twice over - the length counter
+    also resets part-way through a billet (a burp leaves a short fragment), and
+    a positional queue drifts permanently once it miscounts even once.
+
+    STAGES, and the signal that marks each transition:
+
+      press -> table     a NEW length value appears in Profiles on Table N.
+                         The profile came from the billet that most recently
+                         FINISHED, not the one the press is on now - measured
+                         ~72s between the billet counter advancing and the
+                         profile landing on the table.
+
+      table -> stretcher the value DISAPPEARS from the table. Verified against
+                         hand-annotated production data: every disappearance is
+                         followed by Profiles in Batch Formation (Actual)
+                         incrementing 1-3s later, one for one.
+
+      batch -> saw       Actual resets to 0. Size is the peak it reached, which
+                         is NOT reliably the setpoint field - observed reading
+                         8 while the counter reset at 6.
     """
 
     def __init__(self, db):
         self._db = db
         state = db.coldsaw_state.find_one({"_id": "state"}) or {}
-        self._queue = state.get("queue", [])
+        if state.get("version") != STATE_VERSION:
+            # Older state came from a different (wrong) model - drop it rather
+            # than inherit its mis-attributions.
+            db.coldsaw_batches.delete_many({})
+            state = {}
+        self._on_table = state.get("on_table", [])
         self._last_actual = state.get("last_actual")
-        self._last_length = state.get("last_length")
-        self._peaks = state.get("peaks", [])
-        self._peak_running = state.get("peak_running", 0.0)
+        self._last_billet = state.get("last_billet")
+        self._completed_billet = state.get("completed_billet")
         self._seeded = state.get("seeded", False)
         self._seq = self._resume_seq()
 
@@ -133,65 +201,13 @@ class BatchTracker:
     def _save(self):
         self._db.coldsaw_state.update_one(
             {"_id": "state"},
-            {"$set": {"queue": self._queue, "last_actual": self._last_actual,
-                      "last_length": self._last_length, "peaks": self._peaks[-PEAK_HISTORY:],
-                      "peak_running": self._peak_running, "seeded": self._seeded,
-                      "updated_at": datetime.utcnow()}},
+            {"$set": {"version": STATE_VERSION, "on_table": self._on_table,
+                      "last_actual": self._last_actual,
+                      "last_billet": self._last_billet,
+                      "completed_billet": self._completed_billet,
+                      "seeded": self._seeded, "updated_at": datetime.utcnow()}},
             upsert=True)
 
-    # ---- queue ---------------------------------------------------------
-    def _seed(self, doc):
-        """One placeholder per profile already on the table at cold start.
-
-        Without this every later pop is shifted by the queue depth, which would
-        attach real billet numbers to the wrong profiles - worse than admitting
-        the first few are unknown.
-        """
-        for entry in table_occupancy(doc):
-            self._queue.append({"billet_number": None, "profile": None,
-                                "die_copy": None, "job": None,
-                                "extruded_at": None, "unknown": True,
-                                "length_ft": entry["length_ft"]})
-        self._seeded = True
-
-    def _track_extrusion(self, doc):
-        """Push a completed profile onto the queue when the length resets."""
-        length = _num(doc.get(FLD_LENGTH))
-        if length is None:
-            return
-        prev = self._last_length
-        self._last_length = length
-
-        if prev is None:
-            self._peak_running = length
-            return
-
-        if not (prev > 10 and length < prev * 0.5):
-            self._peak_running = max(self._peak_running, length)
-            return
-
-        peak = max(self._peak_running, prev)
-        self._peak_running = length
-
-        median_peak = _median(self._peaks)
-        if median_peak and peak < MIN_PEAK_FRACTION * median_peak:
-            return                      # mid-billet fragment, not a profile
-        self._peaks.append(peak)
-
-        # Billet number read HERE, at the reset instant, while it still reads
-        # the billet that just finished - it advances a few seconds later.
-        self._queue.append({
-            "billet_number": _num(doc.get(FLD_BILLET)),
-            "billet_number_per_die": _num(doc.get(FLD_BILLET_DIE)),
-            "profile": doc.get(FLD_PROFILE),
-            "die_copy": doc.get(FLD_DIE_COPY),
-            "job": doc.get(FLD_JOB),
-            "extruded_at": doc.get(FLD_DATETIME),
-            "peak_ft": round(peak, 3),
-            "unknown": False,
-        })
-
-    # ---- batches -------------------------------------------------------
     def _forming(self):
         return self._db.coldsaw_batches.find_one({"status": "forming"})
 
@@ -199,47 +215,37 @@ class BatchTracker:
         self._db.coldsaw_batches.insert_one({
             "batch_seq": self._seq, "status": "forming",
             "opened_at": doc.get(FLD_DATETIME), "setpoint": setpoint,
-            "profile": None, "die_copy": None, "members": [],
-        })
+            "profile": None, "die_copy": None, "members": []})
         self._seq += 1
         return self._forming()
 
-    def _add_members(self, count, doc, setpoint):
-        """Pop `count` profiles off the queue into the open batch.
+    def _stretched(self, entry, doc, setpoint):
+        """One profile left the table: it has been stretched and queued."""
+        forming = self._forming() or self._open_batch(doc, setpoint)
+        members = list(forming.get("members", []))
+        existing = forming.get("profile")
+        incoming = entry.get("profile")
 
-        A batch never mixes profiles, so the split is driven by what comes OFF
-        THE QUEUE, not by what the press is running. The press changes over
-        long before the queue drains - a 1412 batch can still be forming while
-        the press is already extruding 1124 - so closing on the press-side
-        profile would cut a batch that is still legitimately homogeneous.
-        """
-        for _ in range(count):
-            entry = dict(self._queue.pop(0)) if self._queue else {
-                "billet_number": None, "unknown": True, "starved": True}
+        # Batches never mix profiles, and the split is driven by what comes off
+        # the TABLE, not by what the press is running - the press changes over
+        # long before the table drains.
+        if existing and incoming and incoming != existing:
+            self._release(len(members), doc, closed_by="profile_change")
+            forming = self._open_batch(doc, setpoint)
+            members = []
 
-            forming = self._forming() or self._open_batch(doc, setpoint)
-            members = list(forming.get("members", []))
-            existing = forming.get("profile")
-            incoming = entry.get("profile")
-
-            if existing and incoming and incoming != existing:
-                # Queue-side changeover: close this batch and start the next.
-                self._release(len(members), doc, closed_by="profile_change")
-                forming = self._open_batch(doc, setpoint)
-                members = []
-
-            entry["slot"] = len(members) + 1
-            entry["stretched_at"] = doc.get(FLD_DATETIME)
-            members.append(entry)
-
-            profiles = {m.get("profile") for m in members if m.get("profile")}
-            self._db.coldsaw_batches.update_one(
-                {"_id": forming["_id"]},
-                {"$set": {"members": members, "setpoint": setpoint,
-                          "profile": (sorted(profiles)[0] if profiles else None),
-                          "die_copy": next((m.get("die_copy") for m in members
-                                            if m.get("die_copy") is not None), None),
-                          "mixed_profile": len(profiles) > 1}})
+        entry = dict(entry)
+        entry["slot"] = len(members) + 1
+        entry["stretched_at"] = doc.get(FLD_DATETIME)
+        members.append(entry)
+        profiles = {m.get("profile") for m in members if m.get("profile")}
+        self._db.coldsaw_batches.update_one(
+            {"_id": forming["_id"]},
+            {"$set": {"members": members, "setpoint": setpoint,
+                      "profile": (sorted(profiles)[0] if profiles else None),
+                      "die_copy": next((m.get("die_copy") for m in members
+                                        if m.get("die_copy") is not None), None),
+                      "mixed_profile": len(profiles) > 1}})
 
     def _release(self, peak, doc, closed_by=None):
         forming = self._forming()
@@ -248,8 +254,6 @@ class BatchTracker:
         members = forming.get("members", [])
         self._db.coldsaw_batches.update_one(
             {"_id": forming["_id"]},
-            # size is what the counter REACHED - batches are often brought over
-            # early, so the setpoint is the nominal target, never the count.
             {"$set": {"status": "released", "released_at": doc.get(FLD_DATETIME),
                       "size": int(peak), "observed_members": len(members),
                       "short_of_setpoint": bool(forming.get("setpoint")
@@ -265,7 +269,6 @@ class BatchTracker:
         self._db.coldsaw_batches.delete_many(
             {"batch_seq": {"$lt": rows[-1]["batch_seq"]}})
 
-    # ---- main ----------------------------------------------------------
     def process(self, doc):
         if not doc:
             return
@@ -273,36 +276,62 @@ class BatchTracker:
         if actual is None:
             return
         setpoint = _num(doc.get(FLD_SETPOINT))
+        ts = doc.get(FLD_DATETIME)
+
+        # Which billet most recently FINISHED. A profile reaching the table
+        # belongs to that one, not to whatever the press has moved on to.
+        billet = _num(doc.get(FLD_BILLET))
+        if billet is not None:
+            if self._last_billet is not None and billet != self._last_billet:
+                self._completed_billet = self._last_billet
+            self._last_billet = billet
+
+        occupancy = table_occupancy(doc)
+        current = [round(e["length_ft"], 3) for e in occupancy]
 
         if not self._seeded:
-            self._seed(doc)
-
-        self._track_extrusion(doc)
-
-        prev = self._last_actual
-        self._last_actual = actual
+            # Profiles already on the table have no recoverable identity.
+            self._on_table = [{"billet_number": None, "unknown": True,
+                               "profile": None, "die_copy": None,
+                               "length_ft": v, "entered_at": ts}
+                              for v in current]
+            self._seeded = True
+        else:
+            added, removed = _align(current, [p["length_ft"] for p in self._on_table])
+            # Removals come off the back (highest position) - those are the
+            # profiles that just went to the stretcher.
+            for _ in range(removed):
+                if self._on_table:
+                    self._stretched(self._on_table.pop(), doc, setpoint)
+            # Insertions arrive at the front (Table 1), newest first.
+            for v in reversed(current[:added]):
+                self._on_table.insert(0, {
+                    "billet_number": self._completed_billet,
+                    "unknown": self._completed_billet is None,
+                    "profile": doc.get(FLD_PROFILE),
+                    "die_copy": doc.get(FLD_DIE_COPY),
+                    "job": doc.get(FLD_JOB),
+                    "length_ft": v, "entered_at": ts})
 
         self._db.coldsaw_live.update_one(
             {"_id": "live"},
-            {"$set": {"ts": doc.get(FLD_DATETIME), "profile": doc.get(FLD_PROFILE),
+            {"$set": {"ts": ts, "profile": doc.get(FLD_PROFILE),
                       "die_copy": doc.get(FLD_DIE_COPY), "actual": actual,
                       "setpoint": setpoint,
                       "cut_number": _num(doc.get(FLD_CUT_NUMBER)),
                       "cuts_total": _num(doc.get(FLD_CUTS_TOTAL)),
-                      "billet_at_press": _num(doc.get(FLD_BILLET)),
-                      "queue_depth": len(self._queue),
-                      "queue_unknown": sum(1 for q in self._queue if q.get("unknown")),
-                      "table": table_occupancy(doc),
-                      "updated_at": datetime.utcnow()}},
+                      "billet_at_press": billet,
+                      "completed_billet": self._completed_billet,
+                      "queue_depth": len(self._on_table),
+                      "queue_unknown": sum(1 for v in self._on_table
+                                           if v.get("unknown")),
+                      "table": occupancy, "updated_at": datetime.utcnow()}},
             upsert=True)
 
-        if prev is not None:
-            if actual > prev:
-                # Use the DELTA, not "one per increment": two profiles stretched
-                # between polls would otherwise be recorded as one.
-                self._add_members(int(actual - prev), doc, setpoint)
-            elif actual < prev:
-                self._release(prev, doc)
+        prev = self._last_actual
+        self._last_actual = actual
+        if prev is not None and actual < prev:
+            self._release(prev, doc)
 
         self._save()
 
@@ -331,14 +360,49 @@ def current_state():
     return {"live": live, "forming": forming, "released": released, "stale": stale}
 
 
+def _acquire_lock(db):
+    """Claim (or renew) the right to be the only writer.
+
+    Held by heartbeat rather than a fixed lease so a worker that dies is taken
+    over within LOCK_TTL_S instead of wedging the tracker permanently.
+    """
+    now = datetime.utcnow()
+    stale = now - timedelta(seconds=LOCK_TTL_S)
+    res = db.coldsaw_lock.update_one(
+        {"_id": LOCK_ID,
+         "$or": [{"owner": OWNER}, {"heartbeat": {"$lt": stale}}]},
+        {"$set": {"owner": OWNER, "heartbeat": now}})
+    if res.matched_count:
+        return True
+    try:
+        db.coldsaw_lock.insert_one(
+            {"_id": LOCK_ID, "owner": OWNER, "heartbeat": now})
+        return True
+    except Exception:
+        return False        # someone else holds it; stand by
+
+
 def run_poll_loop():
     db = get_db()
-    tracker = BatchTracker(db)
-    print("[coldsaw] polling press_data every {}s".format(POLL_INTERVAL_S))
+    tracker = None
+    was_leader = False
+    print("[coldsaw] poller starting as {}".format(OWNER))
     while True:
         try:
-            doc = db.press_data.find_one({}, sort=[(FLD_DATETIME, -1)])
-            tracker.process(doc)
+            leader = _acquire_lock(db)
+            if leader:
+                if not was_leader:
+                    # Re-read state on taking over: another process may have
+                    # advanced it since this one last looked.
+                    tracker = BatchTracker(db)
+                    print("[coldsaw] acquired lock, polling every {}s".format(
+                        POLL_INTERVAL_S))
+                doc = db.press_data.find_one({}, sort=[(FLD_DATETIME, -1)])
+                tracker.process(doc)
+            elif was_leader:
+                print("[coldsaw] lost lock, standing by")
+                tracker = None
+            was_leader = leader
         except Exception as exc:
             print("[coldsaw] poll error (will retry): {}".format(exc))
         time.sleep(POLL_INTERVAL_S)
