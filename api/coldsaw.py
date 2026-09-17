@@ -91,7 +91,7 @@ STALE_AFTER_S = 300
 # Bump to discard queue/batch state written by an older, buggy build rather
 # than carrying its corruption forward. v2 clears the state left by the
 # unlocked multi-worker version.
-STATE_VERSION = 6
+STATE_VERSION = 7
 
 # app.py starts the pollers at IMPORT time, which under gunicorn happens once
 # per worker - so every worker ran its own coldsaw poller against the same
@@ -224,6 +224,8 @@ class BatchTracker:
         self._last_billet = state.get("last_billet")
         self._completed_billet = state.get("completed_billet")
         self._seeded = state.get("seeded", False)
+        self._pending = state.get("pending", [])
+        self._last_enqueued = state.get("last_enqueued")
         self._entries_this_billet = state.get("entries_this_billet", 0)
         self._ppb_history = state.get("ppb_history", [])
         self._hotsaw_this_billet = state.get("hotsaw_this_billet", 0)
@@ -244,12 +246,49 @@ class BatchTracker:
                       "profiles_per_billet": _profiles_per_billet(self._ppb_history),
                       "hotsaw_edges_this_billet": self._hotsaw_this_billet,
                       "seeded": self._seeded,
+                      "pending": self._pending,
+                      "last_enqueued": self._last_enqueued,
                       "entries_this_billet": self._entries_this_billet,
                       "ppb_history": self._ppb_history[-PPB_HISTORY:],
                       "hotsaw_this_billet": self._hotsaw_this_billet,
                       "last_hotsaw": self._last_hotsaw,
                       "updated_at": datetime.utcnow()}},
             upsert=True)
+
+    def _complete_billet(self, number, per_billet):
+        """Record that a billet has finished extruding and owes profiles.
+
+        A QUEUE, not a single "last completed" value. That scalar lagged
+        whenever the billet counter stopped advancing - most obviously at the
+        end of an order, where it sits on the final billet forever, so that
+        billet's profile arrived while the scalar still named its predecessor.
+        Live symptom: a 63-billet run of 1262 ended [60.1, 61.1, 62.1, 62.2],
+        with 62 doubled and 63 missing entirely; mid-order pauses produced the
+        same thing as 3.2/3.3/3.4.
+        """
+        if number in (None, NO_BILLET):
+            return
+        if self._last_enqueued is not None and number <= self._last_enqueued:
+            return                      # already accounted for
+        self._pending.append({"billet": number, "left": max(1, per_billet)})
+        self._last_enqueued = number
+
+    def _take_billet(self, per_billet):
+        """Which billet does the profile now arriving belong to?"""
+        if not self._pending:
+            # The counter has not moved on yet, but a profile has arrived - so
+            # the billet currently AT the press has in fact finished. This is
+            # the end-of-order case, and it is why the scalar was wrong.
+            self._complete_billet(self._last_billet, per_billet)
+        if not self._pending:
+            return None, None
+        head = self._pending[0]
+        total = max(1, per_billet)
+        seq = total - head["left"] + 1
+        head["left"] -= 1
+        if head["left"] <= 0:
+            self._pending.pop(0)
+        return head["billet"], seq
 
     def _forming(self):
         return self._db.coldsaw_batches.find_one({"status": "forming"})
@@ -323,15 +362,20 @@ class BatchTracker:
 
         # Which billet most recently FINISHED. A profile reaching the table
         # belongs to that one, not to whatever the press has moved on to.
+        per_billet = _profiles_per_billet(self._ppb_history) or 1
         billet = _num(doc.get(FLD_BILLET))
         if billet is not None:
             if self._last_billet is not None and billet != self._last_billet:
-                # Billet 0 is the idle placeholder and never a real billet, so
-                # it is never recorded as one - profiles spanning it stay
-                # unknown rather than being labelled with a billet that does
-                # not exist.
+                # Billet 0 is the idle placeholder and never a real billet.
+                self._complete_billet(
+                    self._last_billet if self._last_billet != NO_BILLET else None,
+                    per_billet)
                 self._completed_billet = (
                     self._last_billet if self._last_billet != NO_BILLET else None)
+                if billet < self._last_billet:
+                    # Counter went backwards: a new order. Numbering restarts,
+                    # so the "already accounted for" guard has to restart too.
+                    self._last_enqueued = None
                 if self._entries_this_billet:
                     self._ppb_history.append(self._entries_this_billet)
                     self._ppb_history = self._ppb_history[-PPB_HISTORY:]
@@ -365,14 +409,17 @@ class BatchTracker:
             # Insertions arrive at the front (Table 1), newest first.
             for v in reversed(current[:added]):
                 self._entries_this_billet += 1
-                known = self._completed_billet not in (None, NO_BILLET)
+                # Which profile of its billet this is. On a 2-profiles-per-
+                # billet recipe two parts in a batch share a billet number,
+                # and this is what tells them apart on the view. The sequence
+                # comes from the queue, so it can never run past the recipe's
+                # profiles-per-billet the way the old free-running counter did.
+                owner, seq = self._take_billet(per_billet)
+                known = owner not in (None, NO_BILLET)
                 self._on_table.insert(0, {
-                    "billet_number": self._completed_billet if known else None,
+                    "billet_number": owner if known else None,
                     "unknown": not known,
-                    # Which profile of its billet this is. On a 2-profiles-per
-                    # -billet recipe two parts in a batch share a billet
-                    # number, and this is what tells them apart on the view.
-                    "billet_seq": self._entries_this_billet,
+                    "billet_seq": seq,
                     "profile": doc.get(FLD_PROFILE),
                     "die_copy": doc.get(FLD_DIE_COPY),
                     "job": doc.get(FLD_JOB),
@@ -392,6 +439,7 @@ class BatchTracker:
                       "queue_depth": len(self._on_table),
                       "queue_unknown": sum(1 for v in self._on_table
                                            if v.get("unknown")),
+                      "pending_billets": [p["billet"] for p in self._pending],
                       "table": occupancy,
                       # The tracked sequence, newest first, carrying identity -
                       # so the pre-stretch queue can be labelled instead of
