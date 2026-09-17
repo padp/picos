@@ -109,7 +109,11 @@ function ColdsawGroupView({ onBackToDefault }) {
   const live = (state && state.live) || {};
   const forming = state && state.forming;
   const released = (state && state.released) || [];
-  const atSaw = released[0];
+  // The saw runs a couple of batches behind the release point, so this is the
+  // head of the saw queue - advanced only when the cut counter resets. Using
+  // released[0] made a newly released batch appear at the saw immediately, so
+  // at a die change the next profile's billets replaced 1262 mid-cut.
+  const atSaw = state && state.at_saw;
   const perBillet = live.profiles_per_billet || 1;
   const setpoint = live.setpoint || (forming && forming.setpoint) || 0;
   const cutsTotal = live.cuts_total || 0;
@@ -139,8 +143,10 @@ function ColdsawGroupView({ onBackToDefault }) {
 
       {/* 1 - at the press */}
       <section className="cs-section">
-        <h2>Currently extruding
-          {live.extruding === false ? <span className="cs-counter">idle</span> : null}
+        <h2>At the press
+          <span className={`cs-counter${live.extruding ? ' cs-run' : ''}`}>
+            {live.extruding ? 'extruding' : 'not extruding'}
+          </span>
         </h2>
         <div className="cs-now">
           <div className="cs-now-item"><span>Profile</span><b>{live.profile || '—'}</b></div>
@@ -214,7 +220,7 @@ function ColdsawGroupView({ onBackToDefault }) {
         )}
       </section>
 
-      {released.length > 1 && (
+      {released.length > 0 && (
         <section className="cs-section">
           <h2>Recent batches</h2>
           <table className="cs-recent">
@@ -222,7 +228,7 @@ function ColdsawGroupView({ onBackToDefault }) {
               <tr><th>Released</th><th>Profile</th><th>Die</th><th>Size</th><th>Billets</th></tr>
             </thead>
             <tbody>
-              {released.slice(1).map((b) => (
+              {released.filter((b) => !atSaw || b.batch_seq !== atSaw.batch_seq).map((b) => (
                 <tr key={b._id}>
                   <td>{(b.released_at || '').slice(-8)}</td>
                   <td>{b.profile}</td>
@@ -260,6 +266,7 @@ const CSS = `
   color: #6b7a8c; margin: 0 0 .6rem; display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
 .cs-counter { font-variant-numeric: tabular-nums; background: #eef2f7; color: #35455a;
   border-radius: 999px; padding: .1rem .55rem; font-size: .78rem; letter-spacing: 0; }
+.cs-counter.cs-run { background: #e4f3e8; color: #2c6b41; }
 .cs-caption { font-size: .8rem; color: #6b7a8c; margin: .55rem 0 0; }
 .cs-note { padding: .6rem .8rem; border-radius: 6px; background: #eef2f7; font-size: .85rem; margin-top: .75rem; }
 .cs-error { background: #fdecec; color: #8c2f2f; }

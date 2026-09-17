@@ -82,6 +82,14 @@ NO_BILLET = 0
 # How many billets to keep when deducing profiles-per-billet. Long enough to
 # ride out a stoppage, short enough to follow a recipe change.
 PPB_HISTORY = 12
+
+# Batches sit staged between the stretcher and the saw, so the batch being CUT
+# is not the one most recently released - measured at 2 batches deep on two
+# different recipes. That depth is not directly observable, so on a cold start
+# the saw queue is seeded with this many placeholders; real batches only reach
+# the head once those drain, rather than a just-released batch appearing at the
+# saw immediately.
+SAW_BUFFER_DEFAULT = 2
 # press_data's Date/Time is plant-local wall clock, and this runs on Render in
 # UTC - comparing it against datetime.now() reports everything as ~5 hours
 # stale, permanently. plant_now() is billet_monitor's fix for the identical bug
@@ -91,7 +99,7 @@ STALE_AFTER_S = 300
 # Bump to discard queue/batch state written by an older, buggy build rather
 # than carrying its corruption forward. v2 clears the state left by the
 # unlocked multi-worker version.
-STATE_VERSION = 7
+STATE_VERSION = 8
 
 # app.py starts the pollers at IMPORT time, which under gunicorn happens once
 # per worker - so every worker ran its own coldsaw poller against the same
@@ -224,6 +232,8 @@ class BatchTracker:
         self._last_billet = state.get("last_billet")
         self._completed_billet = state.get("completed_billet")
         self._seeded = state.get("seeded", False)
+        self._saw_queue = state.get("saw_queue", [])
+        self._last_cut = state.get("last_cut")
         self._pending = state.get("pending", [])
         self._last_enqueued = state.get("last_enqueued")
         self._entries_this_billet = state.get("entries_this_billet", 0)
@@ -246,6 +256,8 @@ class BatchTracker:
                       "profiles_per_billet": _profiles_per_billet(self._ppb_history),
                       "hotsaw_edges_this_billet": self._hotsaw_this_billet,
                       "seeded": self._seeded,
+                      "saw_queue": self._saw_queue,
+                      "last_cut": self._last_cut,
                       "pending": self._pending,
                       "last_enqueued": self._last_enqueued,
                       "entries_this_billet": self._entries_this_billet,
@@ -341,6 +353,7 @@ class BatchTracker:
                       "short_of_setpoint": bool(forming.get("setpoint")
                                                 and peak < forming["setpoint"]),
                       "closed_by": closed_by or "counter_reset"}})
+        self._saw_queue.append({"batch_seq": forming.get("batch_seq")})
         self._prune()
 
     def _prune(self):
@@ -398,6 +411,7 @@ class BatchTracker:
                                "profile": None, "die_copy": None,
                                "length_ft": v, "entered_at": ts}
                               for v in current]
+            self._saw_queue = [{"batch_seq": None} for _ in range(SAW_BUFFER_DEFAULT)]
             self._seeded = True
         else:
             added, removed = _align(current, [p["length_ft"] for p in self._on_table])
@@ -440,6 +454,9 @@ class BatchTracker:
                       "queue_unknown": sum(1 for v in self._on_table
                                            if v.get("unknown")),
                       "pending_billets": [p["billet"] for p in self._pending],
+                      "at_saw_seq": (self._saw_queue[0].get("batch_seq")
+                                     if self._saw_queue else None),
+                      "saw_queue_depth": len(self._saw_queue),
                       "table": occupancy,
                       # The tracked sequence, newest first, carrying identity -
                       # so the pre-stretch queue can be labelled instead of
@@ -456,6 +473,19 @@ class BatchTracker:
                       "extruding": bool(doc.get(FLD_EXTRUDING)),
                       "updated_at": datetime.utcnow()}},
             upsert=True)
+
+        # The saw's cut counter runs 0..N for one batch then resets, so a reset
+        # is the saw FINISHING a batch and starting the next. Advancing the saw
+        # queue only here is what stops the display flipping mid-cut - which is
+        # exactly what happened at a die change, where a newly released batch
+        # from the next profile appeared at the saw while 1262 was still being
+        # cut.
+        cut = _num(doc.get(FLD_CUT_NUMBER))
+        if cut is not None:
+            if self._last_cut is not None and cut < self._last_cut:
+                if self._saw_queue:
+                    self._saw_queue.pop(0)
+            self._last_cut = cut
 
         prev = self._last_actual
         self._last_actual = actual
@@ -486,7 +516,19 @@ def current_state():
     except (TypeError, ValueError):
         pass
 
-    return {"live": live, "forming": forming, "released": released, "stale": stale}
+    # The batch AT the saw is the head of the saw queue, not the newest release.
+    at_saw = None
+    seq = live.get("at_saw_seq")
+    if seq is not None:
+        at_saw = next((b for b in released if b.get("batch_seq") == seq), None)
+        if at_saw is None:
+            found = db.coldsaw_batches.find_one({"batch_seq": seq})
+            if found:
+                found["_id"] = str(found["_id"])
+                at_saw = found
+
+    return {"live": live, "forming": forming, "released": released,
+            "at_saw": at_saw, "stale": stale}
 
 
 def _acquire_lock(db):
