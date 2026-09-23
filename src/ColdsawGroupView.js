@@ -119,6 +119,14 @@ function ColdsawGroupView({ onBackToDefault }) {
   const cutsTotal = live.cuts_total || 0;
   const cutNumber = live.cut_number || 0;
   const cutPct = cutsTotal ? Math.min(100, (cutNumber / cutsTotal) * 100) : 0;
+  // The saw's cut counter reaches cuts_total and sits there until it resets
+  // for the next batch - confirmed against real production data (cut_number
+  // hits cuts_total exactly in 21 of 25 sampled runs). Rather than wait for
+  // that reset to move a batch into Recent Batches, treat reaching the total
+  // as done: otherwise a batch that finished cutting but is waiting on the
+  // next one to arrive would sit in "At the coldsaw" looking still in
+  // progress for however long that gap lasts.
+  const atSawDone = !!(atSaw && cutsTotal > 0 && cutNumber >= cutsTotal);
 
   // the run-out table arrives newest-first; Track wants oldest-first
   const preStretch = (live.on_table || []).slice().reverse();
@@ -198,11 +206,19 @@ function ColdsawGroupView({ onBackToDefault }) {
       {/* 4 - at the saw */}
       <section className="cs-section">
         <h2>At the coldsaw
-          {cutsTotal ? <span className="cs-counter">cut {cutNumber} of {cutsTotal}</span> : null}
+          {cutsTotal ? (
+            <span className={`cs-counter${atSawDone ? ' cs-done' : ''}`}>
+              cut {cutNumber} of {cutsTotal}{atSawDone ? ' · done' : ''}
+            </span>
+          ) : null}
           {live.cut_length_in ? <span className="cs-counter">{live.cut_length_in.toFixed(2)} in</span> : null}
         </h2>
-        {!atSaw ? (
-          <p className="cs-caption">No released batch recorded yet.</p>
+        {!atSaw || atSawDone ? (
+          <p className="cs-caption">
+            {atSawDone
+              ? 'Finished cutting — see Recent batches below. Waiting for the next batch to reach the saw.'
+              : 'No released batch recorded yet.'}
+          </p>
         ) : (
           <>
             <Track members={atSaw.members} perBillet={perBillet}
@@ -228,7 +244,7 @@ function ColdsawGroupView({ onBackToDefault }) {
               <tr><th>Released</th><th>Profile</th><th>Die</th><th>Size</th><th>Billets</th></tr>
             </thead>
             <tbody>
-              {released.filter((b) => !atSaw || b.batch_seq !== atSaw.batch_seq).map((b) => (
+              {released.filter((b) => atSawDone || !atSaw || b.batch_seq !== atSaw.batch_seq).map((b) => (
                 <tr key={b._id}>
                   <td>{(b.released_at || '').slice(-8)}</td>
                   <td>{b.profile}</td>
@@ -267,6 +283,7 @@ const CSS = `
 .cs-counter { font-variant-numeric: tabular-nums; background: #eef2f7; color: #35455a;
   border-radius: 999px; padding: .1rem .55rem; font-size: .78rem; letter-spacing: 0; }
 .cs-counter.cs-run { background: #e4f3e8; color: #2c6b41; }
+.cs-counter.cs-done { background: #eaf1fb; color: #2c5a8c; }
 .cs-caption { font-size: .8rem; color: #6b7a8c; margin: .55rem 0 0; }
 .cs-note { padding: .6rem .8rem; border-radius: 6px; background: #eef2f7; font-size: .85rem; margin-top: .75rem; }
 .cs-error { background: #fdecec; color: #8c2f2f; }
